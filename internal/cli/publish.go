@@ -89,11 +89,11 @@ func newPublishValidateCmd() *cobra.Command {
 			// Human-readable output
 			for _, c := range result.Checks {
 				status := "PASS"
+				if c.Warning != "" && c.Passed {
+					status = "WARN"
+				}
 				if !c.Passed {
 					status = "FAIL"
-				}
-				if c.Warning != "" {
-					status = "WARN"
 				}
 				fmt.Fprintf(os.Stderr, "  %-20s %s", c.Name, status)
 				if c.Error != "" {
@@ -151,7 +151,9 @@ func newPublishPackageCmd() *cobra.Command {
 				if asJSON {
 					enc := json.NewEncoder(os.Stdout)
 					enc.SetIndent("", "  ")
-					return enc.Encode(vResult)
+					if encErr := enc.Encode(vResult); encErr != nil {
+						return encErr
+					}
 				}
 				return &ExitError{Code: ExitPublishError, Err: fmt.Errorf("validation failed, cannot package")}
 			}
@@ -253,22 +255,9 @@ func runValidation(dir string) ValidateResult {
 		}
 	}
 
-	// 2. go mod tidy check
-	tidyCheck := runGoCheck(dir, "mod", "tidy")
-	if tidyCheck.Passed {
-		// Check if go.sum or go.mod changed (tidy made modifications)
-		diffCmd := exec.Command("git", "diff", "--name-only", "go.mod", "go.sum")
-		diffCmd.Dir = dir
-		if diffOut, err := diffCmd.Output(); err == nil && len(strings.TrimSpace(string(diffOut))) > 0 {
-			tidyCheck.Passed = false
-			tidyCheck.Error = "go.mod or go.sum is not tidy"
-			allPassed = false
-			// Restore original state
-			restoreCmd := exec.Command("git", "checkout", "--", "go.mod", "go.sum")
-			restoreCmd.Dir = dir
-			_ = restoreCmd.Run()
-		}
-	} else {
+	// 2. go mod tidy check — snapshot files, run tidy, compare, restore
+	tidyCheck := checkGoModTidy(dir)
+	if !tidyCheck.Passed {
 		allPassed = false
 	}
 	result.Checks = append(result.Checks, tidyCheck)
@@ -357,18 +346,64 @@ func runGoCheck(dir string, args ...string) CheckResult {
 	return CheckResult{Name: name, Passed: true}
 }
 
+func checkGoModTidy(dir string) CheckResult {
+	modPath := filepath.Join(dir, "go.mod")
+	sumPath := filepath.Join(dir, "go.sum")
+
+	// Snapshot current content
+	origMod, modErr := os.ReadFile(modPath)
+	origSum, _ := os.ReadFile(sumPath) // go.sum may not exist yet
+
+	if modErr != nil {
+		return CheckResult{Name: "go mod tidy", Passed: false, Error: "go.mod not found"}
+	}
+
+	// Run go mod tidy
+	cmd := exec.Command("go", "mod", "tidy")
+	cmd.Dir = dir
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		// Restore originals before returning
+		_ = os.WriteFile(modPath, origMod, 0o644)
+		if origSum != nil {
+			_ = os.WriteFile(sumPath, origSum, 0o644)
+		}
+		errMsg := strings.TrimSpace(string(output))
+		if errMsg == "" {
+			errMsg = err.Error()
+		}
+		return CheckResult{Name: "go mod tidy", Passed: false, Error: errMsg}
+	}
+
+	// Compare with originals
+	newMod, _ := os.ReadFile(modPath)
+	newSum, _ := os.ReadFile(sumPath)
+
+	modChanged := string(origMod) != string(newMod)
+	sumChanged := string(origSum) != string(newSum)
+
+	// Always restore originals (validation should be non-destructive)
+	_ = os.WriteFile(modPath, origMod, 0o644)
+	if origSum != nil {
+		_ = os.WriteFile(sumPath, origSum, 0o644)
+	} else {
+		// go.sum didn't exist before; if tidy created it, remove it
+		if sumChanged {
+			_ = os.Remove(sumPath)
+		}
+	}
+
+	if modChanged || sumChanged {
+		return CheckResult{Name: "go mod tidy", Passed: false, Error: "go.mod or go.sum is not tidy"}
+	}
+	return CheckResult{Name: "go mod tidy", Passed: true}
+}
+
 func findBuiltBinary(dir, cliName string) string {
-	// Look for the binary in common locations
+	// Check existing candidate paths first
 	candidates := []string{
 		filepath.Join(dir, cliName),
 		filepath.Join(dir, "cmd", cliName, cliName),
-	}
-
-	// Also try go build output location
-	buildCmd := exec.Command("go", "build", "-o", filepath.Join(dir, cliName), "./cmd/"+cliName)
-	buildCmd.Dir = dir
-	if err := buildCmd.Run(); err == nil {
-		return filepath.Join(dir, cliName)
 	}
 
 	for _, c := range candidates {
@@ -376,6 +411,22 @@ func findBuiltBinary(dir, cliName string) string {
 			return c
 		}
 	}
+
+	// Fallback: try targeted build to produce the binary
+	outPath := filepath.Join(dir, cliName)
+	buildCmd := exec.Command("go", "build", "-o", outPath, "./cmd/"+cliName)
+	buildCmd.Dir = dir
+	if err := buildCmd.Run(); err == nil {
+		return outPath
+	}
+
+	// Last resort: try building from root
+	buildCmd2 := exec.Command("go", "build", "-o", outPath, ".")
+	buildCmd2.Dir = dir
+	if err := buildCmd2.Run(); err == nil {
+		return outPath
+	}
+
 	return ""
 }
 
