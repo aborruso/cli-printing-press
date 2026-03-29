@@ -20,17 +20,17 @@ const CLIManifestFilename = ".printing-press.json"
 // It is written to the root of each published CLI directory so the
 // folder is self-describing even in isolation.
 type CLIManifest struct {
-	SchemaVersion       int       `json:"schema_version"`
-	GeneratedAt         time.Time `json:"generated_at"`
-	PrintingPressVersion string   `json:"printing_press_version"`
-	APIName             string    `json:"api_name"`
-	CLIName             string    `json:"cli_name"`
-	SpecURL             string    `json:"spec_url,omitempty"`
-	SpecPath            string    `json:"spec_path,omitempty"`
-	SpecFormat          string    `json:"spec_format,omitempty"`
-	SpecChecksum        string    `json:"spec_checksum,omitempty"`
-	RunID               string    `json:"run_id,omitempty"`
-	CatalogEntry        string    `json:"catalog_entry,omitempty"`
+	SchemaVersion        int       `json:"schema_version"`
+	GeneratedAt          time.Time `json:"generated_at"`
+	PrintingPressVersion string    `json:"printing_press_version"`
+	APIName              string    `json:"api_name"`
+	CLIName              string    `json:"cli_name"`
+	SpecURL              string    `json:"spec_url,omitempty"`
+	SpecPath             string    `json:"spec_path,omitempty"`
+	SpecFormat           string    `json:"spec_format,omitempty"`
+	SpecChecksum         string    `json:"spec_checksum,omitempty"`
+	RunID                string    `json:"run_id,omitempty"`
+	CatalogEntry         string    `json:"catalog_entry,omitempty"`
 }
 
 // WriteCLIManifest marshals m as indented JSON and writes it to
