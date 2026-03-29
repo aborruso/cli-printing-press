@@ -646,7 +646,6 @@ If user selects **"Brainstorm more features"**, run a lightweight feature brains
 3. "If this CLI could do one magical thing, what would make you say 'I need this'?"
 
 Each answer that produces a concrete feature → add to the transcendence table. After the brainstorm, return to this gate with the updated manifest.
-
 WAIT for approval. Do NOT generate until approved.
 
 ---
