@@ -137,18 +137,53 @@ func TestPublishValidateJSONHasAllChecks(t *testing.T) {
 		checkNames[c.Name] = true
 	}
 
-	assert.True(t, checkNames["manifest"], "should have manifest check")
-	assert.True(t, checkNames["manuscripts"], "should have manuscripts check")
-	// go mod/vet/build and --help/--version may fail but should be present
-	assert.GreaterOrEqual(t, len(result.Checks), 5, "should have at least 5 checks")
+	// All 7 checks should be present (they may fail in test env, but must exist)
+	expectedChecks := []string{"manifest", "go mod tidy", "go vet", "go build", "--help", "--version", "manuscripts"}
+	for _, name := range expectedChecks {
+		assert.True(t, checkNames[name], "should have %q check", name)
+	}
+	assert.Len(t, result.Checks, 7, "should have exactly 7 checks")
 }
 
-func TestPublishPackageMissingFlags(t *testing.T) {
+func TestPublishValidateExitCode(t *testing.T) {
+	home := setLibraryTestEnv(t)
+	cliDir := filepath.Join(home, "library", "test-pp-cli")
+	require.NoError(t, os.MkdirAll(cliDir, 0o755))
+	// No manifest -> validation fails
+
+	cmd := newPublishCmd()
+	cmd.SetArgs([]string{"validate", "--dir", cliDir, "--json"})
+
+	_, err := runWithCapturedStdout(t, cmd.Execute)
+	require.Error(t, err)
+
+	var exitErr *ExitError
+	require.ErrorAs(t, err, &exitErr)
+	assert.Equal(t, ExitPublishError, exitErr.Code, "should use ExitPublishError exit code")
+}
+
+func TestPublishPackageMissingDirFlag(t *testing.T) {
 	cmd := newPublishCmd()
 	cmd.SetArgs([]string{"package", "--json"})
 	err := cmd.Execute()
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "--dir is required")
+}
+
+func TestPublishPackageMissingCategoryFlag(t *testing.T) {
+	cmd := newPublishCmd()
+	cmd.SetArgs([]string{"package", "--dir", "/tmp/fake", "--json"})
+	err := cmd.Execute()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "--category is required")
+}
+
+func TestPublishPackageMissingTargetFlag(t *testing.T) {
+	cmd := newPublishCmd()
+	cmd.SetArgs([]string{"package", "--dir", "/tmp/fake", "--category", "ai", "--json"})
+	err := cmd.Execute()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "--target is required")
 }
 
 func TestPublishPackageTargetExists(t *testing.T) {
