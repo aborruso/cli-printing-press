@@ -876,6 +876,52 @@ Write:
 
 `$PROOFS_DIR/<stamp>-fix-<api>-pp-cli-live-smoke.md`
 
+## Phase 6: Publish
+
+After the final phase completes (Phase 4 if no live smoke, Phase 5 if it ran), offer to publish the CLI to the library repo.
+
+### Gate
+
+Skip this phase entirely if the shipcheck verdict from Phase 4 was `hold`. Only proceed for `ship` or `ship-with-gaps`.
+
+### Check for existing PR
+
+Run a lightweight check for an existing open publish PR:
+
+```bash
+gh pr list --repo mvanhorn/printing-press-library --head "feat/<cli-name>" --state open --json number,url --jq '.[0]' 2>/dev/null
+```
+
+If this fails (gh not authenticated, network error, etc.), continue without PR context — the publish skill will handle auth in its own Step 1.
+
+### Offer
+
+Present via `AskUserQuestion`:
+
+**If an existing open PR was found:**
+
+> "<cli-name> passed shipcheck. There's an open publish PR (#N). Want to update it with this version?"
+>
+> 1. **Yes — update PR #N** (re-validate, re-package, and push to the existing PR)
+> 2. **No — I'm done**
+
+**If no existing PR:**
+
+> "<cli-name> passed shipcheck. Want to publish it to the printing-press-library?"
+>
+> 1. **Yes — publish now** (validate, package, and open a PR)
+> 2. **No — I'm done**
+
+If the verdict was `ship-with-gaps`, prepend: "Note: shipcheck found minor gaps (see the shipcheck report above)."
+
+### If accepted
+
+Invoke `/printing-press publish <cli-name>`. The publish skill handles everything from there — name resolution, category, validation, packaging, git ops, and PR creation or update.
+
+### If declined
+
+End normally. The CLI is in `$PRESS_LIBRARY/<api>-pp-cli` and the user can run `/printing-press publish` later.
+
 ## Fast Guidance
 
 ### When to use `printing-press print`
