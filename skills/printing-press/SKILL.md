@@ -882,7 +882,11 @@ After the final phase completes (Phase 4 if no live smoke, Phase 5 if it ran), o
 
 ### Gate
 
-Skip this phase entirely if the shipcheck verdict from Phase 4 was `hold`. Only proceed for `ship` or `ship-with-gaps`.
+Use the most recent shipcheck verdict:
+- if Phase 5 reran shipcheck after a live-smoke fix, use that rerun verdict
+- otherwise use the Phase 4 verdict
+
+Skip this phase entirely if the final shipcheck verdict is `hold`. Only proceed for `ship` or `ship-with-gaps`.
 
 ### Check for existing PR
 
