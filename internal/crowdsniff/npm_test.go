@@ -130,9 +130,14 @@ class Client {
 		}))
 		defer tarballServer.Close()
 
+		versionPaths := map[string]bool{
+			"/example-sdk/1.0.0":    true,
+			"/example-client/2.0.0": true,
+			"/example-api/0.5.0":    true,
+		}
 		registryServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			switch {
-			case r.URL.Path == "/-/v1/search":
+			switch r.URL.Path {
+			case "/-/v1/search":
 				w.Write(searchResponse(
 					npmPackageInfo{
 						Name:    "example-sdk",
@@ -150,12 +155,12 @@ class Client {
 						Date:    time.Now().Add(-72 * time.Hour),
 					},
 				))
-			case r.URL.Path == "/example-sdk/1.0.0" ||
-				r.URL.Path == "/example-client/2.0.0" ||
-				r.URL.Path == "/example-api/0.5.0":
-				w.Write(versionResponse(tarballServer.URL + "/tarball.tgz"))
 			default:
-				http.NotFound(w, r)
+				if versionPaths[r.URL.Path] {
+					w.Write(versionResponse(tarballServer.URL + "/tarball.tgz"))
+				} else {
+					http.NotFound(w, r)
+				}
 			}
 		}))
 		defer registryServer.Close()
@@ -270,8 +275,8 @@ class Client {
 		t.Parallel()
 
 		registryServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			switch {
-			case r.URL.Path == "/-/v1/search":
+			switch r.URL.Path {
+			case "/-/v1/search":
 				w.Write(searchResponse(
 					npmPackageInfo{
 						Name:    "broken-sdk",
@@ -279,7 +284,7 @@ class Client {
 						Date:    time.Now().Add(-24 * time.Hour),
 					},
 				))
-			case r.URL.Path == "/broken-sdk/1.0.0":
+			case "/broken-sdk/1.0.0":
 				// Return a tarball URL that will fail (non-HTTPS).
 				w.Write(versionResponse("http://bad-server/tarball.tgz"))
 			default:
@@ -321,8 +326,8 @@ class Client {
 		t.Parallel()
 
 		registryServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			switch {
-			case r.URL.Path == "/-/v1/search":
+			switch r.URL.Path {
+			case "/-/v1/search":
 				w.Write(searchResponse(
 					npmPackageInfo{
 						Name:    "missing-sdk",
@@ -330,8 +335,6 @@ class Client {
 						Date:    time.Now().Add(-24 * time.Hour),
 					},
 				))
-			case r.URL.Path == "/missing-sdk/1.0.0":
-				http.NotFound(w, r)
 			default:
 				http.NotFound(w, r)
 			}
@@ -793,8 +796,8 @@ func TestNPMSource_RecencyCutoffFiltering(t *testing.T) {
 		t.Parallel()
 
 		registryServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			switch {
-			case r.URL.Path == "/-/v1/search":
+			switch r.URL.Path {
+			case "/-/v1/search":
 				w.Write(searchResponse(
 					npmPackageInfo{
 						Name:    "recent-sdk",
@@ -848,8 +851,8 @@ func TestNPMSource_MaxPackagesLimit(t *testing.T) {
 	}
 
 	registryServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.URL.Path == "/-/v1/search":
+		switch r.URL.Path {
+		case "/-/v1/search":
 			w.Write(searchResponse(packages...))
 		default:
 			versionCallCount++

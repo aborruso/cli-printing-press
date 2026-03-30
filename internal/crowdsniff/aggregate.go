@@ -12,10 +12,10 @@ var (
 	numericPattern     = regexp.MustCompile(`^\d+$`)
 
 	// Parameter syntax patterns — matches :id, {id}, {user_id}, <id>, <userId>, $id.
-	colonParamPattern  = regexp.MustCompile(`^:[a-zA-Z_][a-zA-Z0-9_]*$`)
+	colonParamPattern   = regexp.MustCompile(`^:[a-zA-Z_][a-zA-Z0-9_]*$`)
 	bracketParamPattern = regexp.MustCompile(`^\{[a-zA-Z_][a-zA-Z0-9_]*\}$`)
-	angleParamPattern  = regexp.MustCompile(`^<[a-zA-Z_][a-zA-Z0-9_]*>$`)
-	dollarParamPattern = regexp.MustCompile(`^\$[a-zA-Z_][a-zA-Z0-9_]*$`)
+	angleParamPattern   = regexp.MustCompile(`^<[a-zA-Z_][a-zA-Z0-9_]*>$`)
+	dollarParamPattern  = regexp.MustCompile(`^\$[a-zA-Z_][a-zA-Z0-9_]*$`)
 )
 
 // tierRank returns a numeric rank for tier ordering (higher = more authoritative).

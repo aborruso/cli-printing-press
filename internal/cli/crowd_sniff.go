@@ -113,12 +113,12 @@ what developers have already mapped in published packages and code.`,
 
 			if asJSON {
 				return json.NewEncoder(os.Stdout).Encode(map[string]interface{}{
-					"spec_path":       outputPath,
-					"endpoints":       endpointCount,
-					"resources":       len(apiSpec.Resources),
-					"npm_discovered":  npmCount,
-					"gh_discovered":   githubCount,
-					"tier_breakdown":  tierCounts,
+					"spec_path":      outputPath,
+					"endpoints":      endpointCount,
+					"resources":      len(apiSpec.Resources),
+					"npm_discovered": npmCount,
+					"gh_discovered":  githubCount,
+					"tier_breakdown": tierCounts,
 				})
 			}
 
@@ -204,4 +204,3 @@ func isHTTPS(rawURL string) bool {
 	}
 	return strings.EqualFold(parsed.Scheme, "https")
 }
-

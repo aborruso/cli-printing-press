@@ -183,7 +183,7 @@ func (s *NPMSource) search(ctx context.Context, query string) ([]npmPackageInfo,
 	if err != nil {
 		return nil, fmt.Errorf("executing search: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("search returned status %d", resp.StatusCode)
@@ -233,7 +233,7 @@ func (s *NPMSource) fetchDownloads(ctx context.Context, packages []npmPackageInf
 		fmt.Fprintf(os.Stderr, "crowd-sniff: downloads request failed: %v\n", err)
 		return result
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		fmt.Fprintf(os.Stderr, "crowd-sniff: downloads API returned status %d\n", resp.StatusCode)
@@ -267,7 +267,7 @@ func (s *NPMSource) fetchTarballURL(ctx context.Context, name, version string) (
 	if err != nil {
 		return "", fmt.Errorf("fetching version metadata: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("version metadata returned status %d", resp.StatusCode)
@@ -306,7 +306,7 @@ func (s *NPMSource) processPackageTarball(ctx context.Context, tarballURL, pkgNa
 	if err != nil {
 		return nil, nil, fmt.Errorf("downloading tarball: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, nil, fmt.Errorf("tarball download returned status %d", resp.StatusCode)
@@ -375,7 +375,7 @@ func extractTarball(r io.Reader, destDir string) error {
 	if err != nil {
 		return fmt.Errorf("opening gzip reader: %w", err)
 	}
-	defer gz.Close()
+	defer func() { _ = gz.Close() }()
 
 	tr := tar.NewReader(gz)
 	absDestDir, err := filepath.Abs(destDir)
@@ -432,10 +432,10 @@ func extractTarball(r io.Reader, destDir string) error {
 
 		// Copy with size limit per file (same global limit via LimitReader on outer reader).
 		if _, err := io.Copy(f, tr); err != nil {
-			f.Close()
+			_ = f.Close()
 			return fmt.Errorf("writing file %s: %w", header.Name, err)
 		}
-		f.Close()
+		_ = f.Close()
 	}
 
 	return nil
