@@ -1,11 +1,39 @@
 package cli
 
 import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
 	"testing"
 
+	"github.com/mvanhorn/cli-printing-press/internal/crowdsniff"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// mockSource implements crowdSniffSource for testing.
+type mockSource struct {
+	result crowdsniff.SourceResult
+	err    error
+}
+
+func (m *mockSource) Discover(_ context.Context, _ string) (crowdsniff.SourceResult, error) {
+	return m.result, m.err
+}
+
+func endpointsResult(baseURL string, endpoints ...crowdsniff.DiscoveredEndpoint) crowdsniff.SourceResult {
+	var candidates []string
+	if baseURL != "" {
+		candidates = []string{baseURL}
+	}
+	return crowdsniff.SourceResult{
+		Endpoints:         endpoints,
+		BaseURLCandidates: candidates,
+	}
+}
 
 func TestCrowdSniffCmd_MissingAPIFlag(t *testing.T) {
 	t.Parallel()
@@ -20,8 +48,222 @@ func TestCrowdSniffCmd_HelpOutput(t *testing.T) {
 	t.Parallel()
 	cmd := newCrowdSniffCmd()
 	cmd.SetArgs([]string{"--help"})
-	// --help causes Execute to return nil (prints help)
 	err := cmd.Execute()
+	assert.NoError(t, err)
+}
+
+func TestRunCrowdSniff_HappyPath(t *testing.T) {
+	t.Parallel()
+
+	outputDir := t.TempDir()
+	outputPath := filepath.Join(outputDir, "test-spec.yaml")
+	var stdout bytes.Buffer
+
+	opts := crowdSniffOptions{
+		sources: []crowdSniffSource{
+			&mockSource{result: endpointsResult("https://api.example.com",
+				crowdsniff.DiscoveredEndpoint{Method: "GET", Path: "/v1/users", SourceTier: crowdsniff.TierOfficialSDK, SourceName: "sdk"},
+				crowdsniff.DiscoveredEndpoint{Method: "POST", Path: "/v1/users", SourceTier: crowdsniff.TierOfficialSDK, SourceName: "sdk"},
+			)},
+		},
+		stdout: &stdout,
+		stderr: &bytes.Buffer{},
+	}
+
+	err := runCrowdSniff(context.Background(), "example", "https://api.example.com", outputPath, false, opts)
+	require.NoError(t, err)
+
+	assert.Contains(t, stdout.String(), "Spec written to")
+	assert.Contains(t, stdout.String(), "2 endpoints")
+
+	// Verify spec file was written.
+	_, err = os.Stat(outputPath)
+	assert.NoError(t, err)
+}
+
+func TestRunCrowdSniff_JSONOutput(t *testing.T) {
+	t.Parallel()
+
+	outputDir := t.TempDir()
+	outputPath := filepath.Join(outputDir, "test-spec.yaml")
+	var stdout bytes.Buffer
+
+	opts := crowdSniffOptions{
+		sources: []crowdSniffSource{
+			&mockSource{result: endpointsResult("https://api.example.com",
+				crowdsniff.DiscoveredEndpoint{Method: "GET", Path: "/users", SourceTier: crowdsniff.TierCodeSearch, SourceName: "gh"},
+			)},
+		},
+		stdout: &stdout,
+		stderr: &bytes.Buffer{},
+	}
+
+	err := runCrowdSniff(context.Background(), "test", "https://api.example.com", outputPath, true, opts)
+	require.NoError(t, err)
+
+	var jsonOut map[string]interface{}
+	require.NoError(t, json.Unmarshal(stdout.Bytes(), &jsonOut))
+	assert.Equal(t, outputPath, jsonOut["spec_path"])
+	assert.Equal(t, float64(1), jsonOut["endpoints"])
+}
+
+func TestRunCrowdSniff_NoEndpointsDiscovered(t *testing.T) {
+	t.Parallel()
+
+	opts := crowdSniffOptions{
+		sources: []crowdSniffSource{
+			&mockSource{result: crowdsniff.SourceResult{}},
+		},
+		stdout: &bytes.Buffer{},
+		stderr: &bytes.Buffer{},
+	}
+
+	err := runCrowdSniff(context.Background(), "obscure-api", "", "", false, opts)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no endpoints discovered")
+}
+
+func TestRunCrowdSniff_NoBaseURL(t *testing.T) {
+	t.Parallel()
+
+	opts := crowdSniffOptions{
+		sources: []crowdSniffSource{
+			&mockSource{result: crowdsniff.SourceResult{
+				Endpoints: []crowdsniff.DiscoveredEndpoint{
+					{Method: "GET", Path: "/users", SourceTier: crowdsniff.TierCodeSearch, SourceName: "gh"},
+				},
+				// No BaseURLCandidates.
+			}},
+		},
+		stdout: &bytes.Buffer{},
+		stderr: &bytes.Buffer{},
+	}
+
+	err := runCrowdSniff(context.Background(), "test", "", "", false, opts)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "could not determine base URL")
+	assert.Contains(t, err.Error(), "--base-url")
+}
+
+func TestRunCrowdSniff_NonHTTPSBaseURL(t *testing.T) {
+	t.Parallel()
+
+	opts := crowdSniffOptions{
+		sources: []crowdSniffSource{
+			&mockSource{result: endpointsResult("http://api.example.com",
+				crowdsniff.DiscoveredEndpoint{Method: "GET", Path: "/users", SourceTier: crowdsniff.TierCodeSearch, SourceName: "gh"},
+			)},
+		},
+		stdout: &bytes.Buffer{},
+		stderr: &bytes.Buffer{},
+	}
+
+	err := runCrowdSniff(context.Background(), "test", "", "", false, opts)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "base URL must use HTTPS")
+}
+
+func TestRunCrowdSniff_BaseURLFlagOverridesCandidate(t *testing.T) {
+	t.Parallel()
+
+	outputDir := t.TempDir()
+	outputPath := filepath.Join(outputDir, "test-spec.yaml")
+
+	opts := crowdSniffOptions{
+		sources: []crowdSniffSource{
+			&mockSource{result: endpointsResult("https://wrong.example.com",
+				crowdsniff.DiscoveredEndpoint{Method: "GET", Path: "/users", SourceTier: crowdsniff.TierCodeSearch, SourceName: "gh"},
+			)},
+		},
+		stdout: &bytes.Buffer{},
+		stderr: &bytes.Buffer{},
+	}
+
+	err := runCrowdSniff(context.Background(), "test", "https://correct.example.com", outputPath, false, opts)
+	require.NoError(t, err)
+
+	data, err := os.ReadFile(outputPath)
+	require.NoError(t, err)
+	assert.Contains(t, string(data), "https://correct.example.com")
+	assert.NotContains(t, string(data), "https://wrong.example.com")
+}
+
+func TestRunCrowdSniff_SourceErrorGracefulDegradation(t *testing.T) {
+	t.Parallel()
+
+	outputDir := t.TempDir()
+	outputPath := filepath.Join(outputDir, "test-spec.yaml")
+	var stderr bytes.Buffer
+
+	opts := crowdSniffOptions{
+		sources: []crowdSniffSource{
+			// First source fails.
+			&mockSource{err: fmt.Errorf("npm registry down")},
+			// Second source succeeds.
+			&mockSource{result: endpointsResult("https://api.example.com",
+				crowdsniff.DiscoveredEndpoint{Method: "GET", Path: "/users", SourceTier: crowdsniff.TierCodeSearch, SourceName: "gh"},
+			)},
+		},
+		stdout: &bytes.Buffer{},
+		stderr: &stderr,
+	}
+
+	err := runCrowdSniff(context.Background(), "test", "", outputPath, false, opts)
+	require.NoError(t, err)
+
+	// Warning logged for failed source.
+	assert.Contains(t, stderr.String(), "warning")
+	assert.Contains(t, stderr.String(), "npm registry down")
+
+	// Spec still written from the successful source.
+	_, err = os.Stat(outputPath)
+	assert.NoError(t, err)
+}
+
+func TestRunCrowdSniff_OutputDirCreated(t *testing.T) {
+	t.Parallel()
+
+	outputDir := filepath.Join(t.TempDir(), "nested", "dir")
+	outputPath := filepath.Join(outputDir, "test-spec.yaml")
+
+	opts := crowdSniffOptions{
+		sources: []crowdSniffSource{
+			&mockSource{result: endpointsResult("https://api.example.com",
+				crowdsniff.DiscoveredEndpoint{Method: "GET", Path: "/users", SourceTier: crowdsniff.TierCodeSearch, SourceName: "gh"},
+			)},
+		},
+		stdout: &bytes.Buffer{},
+		stderr: &bytes.Buffer{},
+	}
+
+	err := runCrowdSniff(context.Background(), "test", "", outputPath, false, opts)
+	require.NoError(t, err)
+
+	_, err = os.Stat(outputPath)
+	assert.NoError(t, err)
+}
+
+func TestRunCrowdSniff_CmdIntegration(t *testing.T) {
+	t.Parallel()
+
+	outputDir := t.TempDir()
+	outputPath := filepath.Join(outputDir, "test-spec.yaml")
+
+	cmd := newCrowdSniffCmdWithOptions(crowdSniffOptions{
+		sources: []crowdSniffSource{
+			&mockSource{result: endpointsResult("https://api.example.com",
+				crowdsniff.DiscoveredEndpoint{Method: "GET", Path: "/v1/users", SourceTier: crowdsniff.TierOfficialSDK, SourceName: "sdk"},
+			)},
+		},
+		stdout: &bytes.Buffer{},
+		stderr: &bytes.Buffer{},
+	})
+
+	cmd.SetArgs([]string{"--api", "example", "--output", outputPath})
+	err := cmd.Execute()
+	require.NoError(t, err)
+
+	_, err = os.Stat(outputPath)
 	assert.NoError(t, err)
 }
 

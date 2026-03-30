@@ -1,8 +1,10 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -14,7 +16,23 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
+// crowdSniffSource is the interface for discovery sources, enabling test injection.
+type crowdSniffSource interface {
+	Discover(ctx context.Context, apiName string) (crowdsniff.SourceResult, error)
+}
+
+// crowdSniffOptions holds injectable dependencies for testing.
+type crowdSniffOptions struct {
+	sources []crowdSniffSource
+	stdout  io.Writer
+	stderr  io.Writer
+}
+
 func newCrowdSniffCmd() *cobra.Command {
+	return newCrowdSniffCmdWithOptions(crowdSniffOptions{})
+}
+
+func newCrowdSniffCmdWithOptions(opts crowdSniffOptions) *cobra.Command {
 	var apiName string
 	var outputPath string
 	var baseURL string
@@ -29,110 +47,7 @@ and GitHub code search. Produces a spec YAML compatible with 'printing-press gen
 Complements 'sniff' (which discovers from live web traffic) by finding
 what developers have already mapped in published packages and code.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if err := validateCrowdSniffAPIName(apiName); err != nil {
-				return err
-			}
-
-			ctx := cmd.Context()
-
-			npmSource := crowdsniff.NewNPMSource(crowdsniff.NPMOptions{})
-			githubSource := crowdsniff.NewGitHubSource(crowdsniff.GitHubOptions{})
-
-			var npmResult, githubResult crowdsniff.SourceResult
-			g := new(errgroup.Group)
-
-			g.Go(func() error {
-				result, err := npmSource.Discover(ctx, apiName)
-				if err != nil {
-					fmt.Fprintf(os.Stderr, "warning: npm source: %v\n", err)
-					return nil
-				}
-				npmResult = result
-				return nil
-			})
-
-			g.Go(func() error {
-				result, err := githubSource.Discover(ctx, apiName)
-				if err != nil {
-					fmt.Fprintf(os.Stderr, "warning: github source: %v\n", err)
-					return nil
-				}
-				githubResult = result
-				return nil
-			})
-
-			if err := g.Wait(); err != nil {
-				return fmt.Errorf("running sources: %w", err)
-			}
-
-			results := []crowdsniff.SourceResult{npmResult, githubResult}
-			aggregated, baseURLCandidates := crowdsniff.Aggregate(results)
-
-			if len(aggregated) == 0 {
-				return fmt.Errorf("no endpoints discovered for %q", apiName)
-			}
-
-			resolvedBaseURL := crowdsniff.ResolveBaseURL(baseURL, baseURLCandidates)
-			if resolvedBaseURL == "" {
-				return fmt.Errorf("could not determine base URL for %q; use --base-url to specify", apiName)
-			}
-
-			if !isHTTPS(resolvedBaseURL) {
-				return fmt.Errorf("base URL must use HTTPS: %s", resolvedBaseURL)
-			}
-
-			apiSpec, err := crowdsniff.BuildSpec(apiName, resolvedBaseURL, aggregated)
-			if err != nil {
-				return fmt.Errorf("building spec: %w", err)
-			}
-
-			if outputPath == "" {
-				outputPath = defaultCrowdSniffCachePath(apiName)
-			}
-
-			if err := validateOutputPath(outputPath); err != nil {
-				return err
-			}
-
-			if err := websniff.WriteSpec(apiSpec, outputPath); err != nil {
-				return fmt.Errorf("writing spec: %w", err)
-			}
-
-			endpointCount := 0
-			for _, resource := range apiSpec.Resources {
-				endpointCount += len(resource.Endpoints)
-			}
-
-			npmCount := len(npmResult.Endpoints)
-			githubCount := len(githubResult.Endpoints)
-
-			tierCounts := make(map[string]int)
-			for _, ep := range aggregated {
-				tierCounts[ep.SourceTier]++
-			}
-
-			if asJSON {
-				return json.NewEncoder(os.Stdout).Encode(map[string]interface{}{
-					"spec_path":      outputPath,
-					"endpoints":      endpointCount,
-					"resources":      len(apiSpec.Resources),
-					"npm_discovered": npmCount,
-					"gh_discovered":  githubCount,
-					"tier_breakdown": tierCounts,
-				})
-			}
-
-			fmt.Printf("Spec written to %s (%d endpoints across %d resources)\n", outputPath, endpointCount, len(apiSpec.Resources))
-			fmt.Printf("Sources: %d from npm, %d from GitHub code search\n", npmCount, githubCount)
-			if len(tierCounts) > 0 {
-				parts := make([]string, 0, len(tierCounts))
-				for tier, count := range tierCounts {
-					parts = append(parts, fmt.Sprintf("%s: %d", tier, count))
-				}
-				fmt.Printf("Tiers: %s\n", strings.Join(parts, ", "))
-			}
-			fmt.Printf("Run 'printing-press generate --spec %s' to build the CLI\n", outputPath)
-			return nil
+			return runCrowdSniff(cmd.Context(), apiName, baseURL, outputPath, asJSON, opts)
 		},
 	}
 
@@ -143,6 +58,110 @@ what developers have already mapped in published packages and code.`,
 	_ = cmd.MarkFlagRequired("api")
 
 	return cmd
+}
+
+func runCrowdSniff(ctx context.Context, apiName, baseURL, outputPath string, asJSON bool, opts crowdSniffOptions) error {
+	stdout := opts.stdout
+	if stdout == nil {
+		stdout = os.Stdout
+	}
+	stderr := opts.stderr
+	if stderr == nil {
+		stderr = os.Stderr
+	}
+
+	if err := validateCrowdSniffAPIName(apiName); err != nil {
+		return err
+	}
+
+	sources := opts.sources
+	if len(sources) == 0 {
+		sources = []crowdSniffSource{
+			crowdsniff.NewNPMSource(crowdsniff.NPMOptions{}),
+			crowdsniff.NewGitHubSource(crowdsniff.GitHubOptions{}),
+		}
+	}
+
+	results := make([]crowdsniff.SourceResult, len(sources))
+	g := new(errgroup.Group)
+
+	for i, src := range sources {
+		g.Go(func() error {
+			result, err := src.Discover(ctx, apiName)
+			if err != nil {
+				fmt.Fprintf(stderr, "warning: source %d: %v\n", i, err)
+				return nil
+			}
+			results[i] = result
+			return nil
+		})
+	}
+
+	if err := g.Wait(); err != nil {
+		return fmt.Errorf("running sources: %w", err)
+	}
+
+	aggregated, baseURLCandidates := crowdsniff.Aggregate(results)
+
+	if len(aggregated) == 0 {
+		return fmt.Errorf("no endpoints discovered for %q", apiName)
+	}
+
+	resolvedBaseURL := crowdsniff.ResolveBaseURL(baseURL, baseURLCandidates)
+	if resolvedBaseURL == "" {
+		return fmt.Errorf("could not determine base URL for %q; use --base-url to specify", apiName)
+	}
+
+	if !isHTTPS(resolvedBaseURL) {
+		return fmt.Errorf("base URL must use HTTPS: %s", resolvedBaseURL)
+	}
+
+	apiSpec, err := crowdsniff.BuildSpec(apiName, resolvedBaseURL, aggregated)
+	if err != nil {
+		return fmt.Errorf("building spec: %w", err)
+	}
+
+	if outputPath == "" {
+		outputPath = defaultCrowdSniffCachePath(apiName)
+	}
+
+	if err := validateOutputPath(outputPath); err != nil {
+		return err
+	}
+
+	if err := websniff.WriteSpec(apiSpec, outputPath); err != nil {
+		return fmt.Errorf("writing spec: %w", err)
+	}
+
+	endpointCount := 0
+	for _, resource := range apiSpec.Resources {
+		endpointCount += len(resource.Endpoints)
+	}
+
+	tierCounts := make(map[string]int)
+	for _, ep := range aggregated {
+		tierCounts[ep.SourceTier]++
+	}
+
+	if asJSON {
+		return json.NewEncoder(stdout).Encode(map[string]interface{}{
+			"spec_path":      outputPath,
+			"endpoints":      endpointCount,
+			"resources":      len(apiSpec.Resources),
+			"tier_breakdown": tierCounts,
+		})
+	}
+
+	fmt.Fprintf(stdout, "Spec written to %s (%d endpoints across %d resources)\n", outputPath, endpointCount, len(apiSpec.Resources))
+	if len(tierCounts) > 0 {
+		parts := make([]string, 0, len(tierCounts))
+		for tier, count := range tierCounts {
+			parts = append(parts, fmt.Sprintf("%s: %d", tier, count))
+		}
+		fmt.Fprintf(stdout, "Tiers: %s\n", strings.Join(parts, ", "))
+	}
+	fmt.Fprintf(stdout, "Run 'printing-press generate --spec %s' to build the CLI\n", outputPath)
+	return nil
 }
 
 // validateCrowdSniffAPIName rejects dangerous --api values.
