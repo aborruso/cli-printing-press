@@ -73,9 +73,9 @@ func specChecksum(path string) (string, error) {
 // PipelineState), the standalone generate command only knows the spec
 // sources and output directory.
 type GenerateManifestParams struct {
-	APIName  string
-	SpecSrcs []string // --spec args (URLs or file paths)
-	DocsURL  string   // --docs URL, if used
+	APIName   string
+	SpecSrcs  []string // --spec args (URLs or file paths)
+	DocsURL   string   // --docs URL, if used
 	OutputDir string
 }
 
