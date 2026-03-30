@@ -1,7 +1,7 @@
 ---
 title: "fix: Generator improvements from postman-explore retro"
 type: fix
-status: active
+status: completed
 date: 2026-03-30
 origin: docs/retros/2026-03-30-postman-explore-retro.md
 ---
