@@ -487,7 +487,7 @@ var (
 	// Examples:
 	//   `Bearer ${token}`
 	//   `Bearer ${this.apiKey}`
-	bearerTemplatePattern = regexp.MustCompile("(?i)Bearer\\s+\\$\\{")
+	bearerTemplatePattern = regexp.MustCompile(`(?i)Bearer\s+\$\{`)
 
 	// xApiKeyHeaderPattern matches X-Api-Key style headers.
 	// Examples:
@@ -512,14 +512,6 @@ var (
 	//   process.env.API_KEY
 	//   process.env['NOTION_API_KEY']
 	envVarHintPattern = regexp.MustCompile(`process\.env\s*(?:\.\s*([A-Z][A-Z0-9_]*(?:API|KEY|TOKEN|SECRET)[A-Z0-9_]*)|\[\s*['"]([A-Z][A-Z0-9_]*(?:API|KEY|TOKEN|SECRET)[A-Z0-9_]*)['"]\s*\])`)
-
-	// constructorAuthHintPattern matches constructor parameters that hint at auth.
-	// Examples:
-	//   constructor(apiKey)
-	//   constructor(apiKey, options)
-	//   new Client(apiKey)
-	//   new SteamAPI(key)
-	constructorAuthHintPattern = regexp.MustCompile(`(?:constructor|new\s+\w+)\s*\(\s*(api_?[Kk]ey|apiKey|key|token|access_?[Tt]oken|accessToken)`)
 )
 
 // GrepAuth scans SDK source code for authentication patterns and returns

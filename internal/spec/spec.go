@@ -14,9 +14,9 @@ type APISpec struct {
 	Version       string              `yaml:"version" json:"version"`
 	BaseURL       string              `yaml:"base_url" json:"base_url"`
 	BasePath      string              `yaml:"base_path,omitempty" json:"base_path,omitempty"`
-	Owner         string              `yaml:"owner,omitempty" json:"owner,omitempty"`                    // GitHub owner for import paths and Homebrew tap
-	SpecSource    string              `yaml:"spec_source,omitempty" json:"spec_source,omitempty"`        // official, community, sniffed, docs — affects generated client defaults
-	ClientPattern string              `yaml:"client_pattern,omitempty" json:"client_pattern,omitempty"`  // rest (default), proxy-envelope — affects generated HTTP client
+	Owner         string              `yaml:"owner,omitempty" json:"owner,omitempty"`                   // GitHub owner for import paths and Homebrew tap
+	SpecSource    string              `yaml:"spec_source,omitempty" json:"spec_source,omitempty"`       // official, community, sniffed, docs — affects generated client defaults
+	ClientPattern string              `yaml:"client_pattern,omitempty" json:"client_pattern,omitempty"` // rest (default), proxy-envelope — affects generated HTTP client
 	ProxyRoutes   map[string]string   `yaml:"proxy_routes,omitempty" json:"proxy_routes,omitempty"`     // path prefix → service name for proxy-envelope routing
 	Auth          AuthConfig          `yaml:"auth" json:"auth"`
 	Config        ConfigSpec          `yaml:"config" json:"config"`
@@ -25,12 +25,12 @@ type APISpec struct {
 }
 
 type AuthConfig struct {
-	Type             string   `yaml:"type" json:"type"`                                             // api_key, oauth2, bearer_token, cookie, none
+	Type             string   `yaml:"type" json:"type"` // api_key, oauth2, bearer_token, cookie, none
 	Header           string   `yaml:"header" json:"header"`
 	Format           string   `yaml:"format" json:"format"`
 	EnvVars          []string `yaml:"env_vars" json:"env_vars"`
-	Scheme           string   `yaml:"scheme,omitempty" json:"scheme,omitempty"`                     // OpenAPI security scheme name
-	In               string   `yaml:"in,omitempty" json:"in,omitempty"`                             // header, query, cookie
+	Scheme           string   `yaml:"scheme,omitempty" json:"scheme,omitempty"` // OpenAPI security scheme name
+	In               string   `yaml:"in,omitempty" json:"in,omitempty"`         // header, query, cookie
 	AuthorizationURL string   `yaml:"authorization_url,omitempty" json:"authorization_url,omitempty"`
 	TokenURL         string   `yaml:"token_url,omitempty" json:"token_url,omitempty"`
 	Scopes           []string `yaml:"scopes,omitempty" json:"scopes,omitempty"`
@@ -78,11 +78,11 @@ type ResponseDef struct {
 }
 
 type Pagination struct {
-	Type           string `yaml:"type" json:"type"`                           // cursor, offset, page_token
-	LimitParam     string `yaml:"limit_param" json:"limit_param"`             // query param name for page size (limit, maxResults, pageSize)
-	CursorParam    string `yaml:"cursor_param" json:"cursor_param"`           // query param name for cursor (after, pageToken, offset)
-	NextCursorPath string `yaml:"next_cursor_path" json:"next_cursor_path"`   // response field with next cursor (nextPageToken, cursor)
-	HasMoreField   string `yaml:"has_more_field" json:"has_more_field"`       // response field indicating more pages (has_more)
+	Type           string `yaml:"type" json:"type"`                         // cursor, offset, page_token
+	LimitParam     string `yaml:"limit_param" json:"limit_param"`           // query param name for page size (limit, maxResults, pageSize)
+	CursorParam    string `yaml:"cursor_param" json:"cursor_param"`         // query param name for cursor (after, pageToken, offset)
+	NextCursorPath string `yaml:"next_cursor_path" json:"next_cursor_path"` // response field with next cursor (nextPageToken, cursor)
+	HasMoreField   string `yaml:"has_more_field" json:"has_more_field"`     // response field indicating more pages (has_more)
 }
 
 type TypeDef struct {
