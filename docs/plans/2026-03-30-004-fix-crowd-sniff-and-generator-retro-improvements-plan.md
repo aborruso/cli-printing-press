@@ -1,7 +1,7 @@
 ---
 title: "fix: Crowd-sniff and generator improvements from Steam retro"
 type: fix
-status: active
+status: completed
 date: 2026-03-30
 origin: docs/retros/2026-03-30-steam-retro.md
 ---
