@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"text/template"
@@ -81,6 +82,7 @@ func New(s *spec.APISpec, outputDir string) *Generator {
 		"cobraFlagFunc":         cobraFlagFunc,
 		"cobraFlagFuncForParam": cobraFlagFuncForParam,
 		"defaultVal":            defaultVal,
+		"defaultValForParam":    defaultValForParam,
 		"zeroVal":               zeroVal,
 		"zeroValForParam": func(name, t string) string {
 			if isIDParam(name) && t == "int" {
@@ -106,8 +108,13 @@ func New(s *spec.APISpec, outputDir string) *Generator {
 		"kebab":              toKebab,
 		"envName":            func(s string) string { return strings.ToUpper(strings.ReplaceAll(s, "-", "_")) },
 		"firstResource": func(resources map[string]spec.Resource) string {
+			var names []string
 			for name := range resources {
-				return name
+				names = append(names, name)
+			}
+			sort.Strings(names)
+			if len(names) > 0 {
+				return names[0]
 			}
 			return "resource"
 		},
@@ -751,14 +758,19 @@ func cobraFlagFuncForParam(name, t string) string {
 	return cobraFlagFunc(t)
 }
 
-func defaultVal(p spec.Param) string {
-	// ID params are overridden to string type — use string defaults
+// defaultValForParam returns the default value for a flag parameter,
+// overriding int→string for ID-like parameters.
+func defaultValForParam(p spec.Param) string {
 	if isIDParam(p.Name) && p.Type == "int" {
 		if p.Default != nil {
 			return fmt.Sprintf("%q", fmt.Sprintf("%v", p.Default))
 		}
 		return `""`
 	}
+	return defaultVal(p)
+}
+
+func defaultVal(p spec.Param) string {
 	if p.Default != nil {
 		// Coerce the default value to match the declared param type
 		switch p.Type {

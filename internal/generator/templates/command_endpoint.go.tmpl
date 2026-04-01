@@ -21,7 +21,7 @@ func new{{camel .FuncPrefix}}{{camel .EndpointName}}Cmd(flags *rootFlags) *cobra
 {{- end}}
 {{- end}}
 {{- range .Endpoint.Body}}
-	var body{{camel .Name}} {{goTypeForParam .Name .Type}}
+	var body{{camel .Name}} {{goType .Type}}
 {{- end}}
 {{- if .Endpoint.Pagination}}
 	var flagAll bool
@@ -95,7 +95,7 @@ func new{{camel .FuncPrefix}}{{camel .EndpointName}}Cmd(flags *rootFlags) *cobra
 			} else {
 				body = map[string]any{}
 {{- range .Endpoint.Body}}
-				if body{{camel .Name}} != {{zeroValForParam .Name .Type}} {
+				if body{{camel .Name}} != {{zeroVal .Type}} {
 					body["{{.Name}}"] = body{{camel .Name}}
 				}
 {{- end}}
@@ -118,7 +118,7 @@ func new{{camel .FuncPrefix}}{{camel .EndpointName}}Cmd(flags *rootFlags) *cobra
 			} else {
 				body = map[string]any{}
 {{- range .Endpoint.Body}}
-				if body{{camel .Name}} != {{zeroValForParam .Name .Type}} {
+				if body{{camel .Name}} != {{zeroVal .Type}} {
 					body["{{.Name}}"] = body{{camel .Name}}
 				}
 {{- end}}
@@ -139,7 +139,7 @@ func new{{camel .FuncPrefix}}{{camel .EndpointName}}Cmd(flags *rootFlags) *cobra
 			} else {
 				body = map[string]any{}
 {{- range .Endpoint.Body}}
-				if body{{camel .Name}} != {{zeroValForParam .Name .Type}} {
+				if body{{camel .Name}} != {{zeroVal .Type}} {
 					body["{{.Name}}"] = body{{camel .Name}}
 				}
 {{- end}}
@@ -234,14 +234,14 @@ func new{{camel .FuncPrefix}}{{camel .EndpointName}}Cmd(flags *rootFlags) *cobra
 
 {{- range .Endpoint.Params}}
 {{- if not .Positional}}
-	cmd.Flags().{{cobraFlagFuncForParam .Name .Type}}(&flag{{camel .Name}}, "{{flagName .Name}}", {{defaultVal .}}, "{{oneline .Description}}")
+	cmd.Flags().{{cobraFlagFuncForParam .Name .Type}}(&flag{{camel .Name}}, "{{flagName .Name}}", {{defaultValForParam .}}, "{{oneline .Description}}")
 {{- if .Required}}
 	_ = cmd.MarkFlagRequired("{{flagName .Name}}")
 {{- end}}
 {{- end}}
 {{- end}}
 {{- range .Endpoint.Body}}
-	cmd.Flags().{{cobraFlagFuncForParam .Name .Type}}(&body{{camel .Name}}, "{{flagName .Name}}", {{defaultVal .}}, "{{oneline .Description}}")
+	cmd.Flags().{{cobraFlagFunc .Type}}(&body{{camel .Name}}, "{{flagName .Name}}", {{defaultVal .}}, "{{oneline .Description}}")
 {{- if .Required}}
 	_ = cmd.MarkFlagRequired("{{flagName .Name}}")
 {{- end}}
