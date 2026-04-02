@@ -622,8 +622,10 @@ func resolveManuscriptDir(msRoot, apiName string) (string, string) {
 			continue
 		}
 		name := e.Name()
-		// Check if either is a prefix of the other
-		if strings.HasPrefix(apiName, name) || strings.HasPrefix(name, apiName) {
+		// Check if either is a prefix of the other WITH a hyphen boundary.
+		// "steam" matches "steam-web" (prefix + hyphen) but NOT "steamgames" (no hyphen).
+		if (strings.HasPrefix(apiName, name+"-") || apiName == name) ||
+			(strings.HasPrefix(name, apiName+"-") || name == apiName) {
 			dir := filepath.Join(msRoot, name)
 			if runID, err := findMostRecentRun(dir); err == nil && runID != "" {
 				return dir, runID
