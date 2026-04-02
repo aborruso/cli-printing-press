@@ -225,23 +225,36 @@ func newPublishPackageCmd() *cobra.Command {
 				ModulePath: modulePath,
 			}
 
+			// Look for manuscripts: try CLI name first (new convention),
+			// then API name, then fuzzy resolve (backwards compatibility).
 			apiName := vResult.APIName
 			if apiName == "" {
 				apiName = naming.TrimCLISuffix(cliName)
 			}
 
 			msRoot := pipeline.PublishedManuscriptsRoot()
-			msAPIDir := filepath.Join(msRoot, apiName)
-			runID, err := findMostRecentRun(msAPIDir)
-			// Fallback: the generator may derive a different slug (e.g., "steam-web")
-			// than the skill used during archiving (e.g., "steam"). Try prefix/suffix
-			// variations and directory scanning when the exact name doesn't match.
-			if err != nil || runID == "" {
-				msAPIDir, runID = resolveManuscriptDir(msRoot, apiName)
+			var msDir string
+			var runID string
+
+			// 1. Try CLI name (new convention: manuscripts/<cli-name>/<run>/)
+			cliMsDir := filepath.Join(msRoot, cliName)
+			if rid, err := findMostRecentRun(cliMsDir); err == nil && rid != "" {
+				msDir, runID = cliMsDir, rid
+			}
+			// 2. Try API name (old convention: manuscripts/<api-name>/<run>/)
+			if runID == "" {
+				apiMsDir := filepath.Join(msRoot, apiName)
+				if rid, err := findMostRecentRun(apiMsDir); err == nil && rid != "" {
+					msDir, runID = apiMsDir, rid
+				}
+			}
+			// 3. Fuzzy resolve (strip suffixes, prefix match)
+			if runID == "" {
+				msDir, runID = resolveManuscriptDir(msRoot, apiName)
 			}
 			if runID != "" {
 				result.RunID = runID
-				srcMsDir := filepath.Join(msAPIDir, runID)
+				srcMsDir := filepath.Join(msDir, runID)
 				dstMsDir := filepath.Join(stagingCLIDir, ".manuscripts", runID)
 				if err := pipeline.CopyDir(srcMsDir, dstMsDir); err != nil {
 					cleanupTarget()
@@ -380,14 +393,17 @@ func runValidation(dir string) ValidateResult {
 	}
 
 	// 7. Manuscripts check (warn-only)
+	// Try CLI name first (new convention), then API name, then fuzzy resolve
 	apiName := result.APIName
 	if apiName == "" {
 		apiName = naming.TrimCLISuffix(cliName)
 	}
 	msRoot := pipeline.PublishedManuscriptsRoot()
-	msDir := filepath.Join(msRoot, apiName)
+	msDir := filepath.Join(msRoot, cliName)
 	if _, err := os.Stat(msDir); os.IsNotExist(err) {
-		// Fallback: try resolving alternate directory names
+		msDir = filepath.Join(msRoot, apiName)
+	}
+	if _, err := os.Stat(msDir); os.IsNotExist(err) {
 		msDir, _ = resolveManuscriptDir(msRoot, apiName)
 	}
 	if _, err := os.Stat(msDir); os.IsNotExist(err) {
