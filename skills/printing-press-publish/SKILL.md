@@ -244,7 +244,25 @@ If `$PUBLISH_REPO_DIR` does not exist:
 
 ### Subsequent publishes
 
-Read `$PUBLISH_CONFIG`, then freshen the clone to match the canonical upstream:
+Read `$PUBLISH_CONFIG`, then re-check access in case it changed (user was granted push access, or access was revoked):
+
+```bash
+CURRENT_ACCESS=$(gh api repos/mvanhorn/printing-press-library --jq '.permissions.push' 2>/dev/null || echo "false")
+CACHED_ACCESS=$(jq -r .access "$PUBLISH_CONFIG")
+
+if [ "$CURRENT_ACCESS" = "true" ] && [ "$CACHED_ACCESS" = "fork" ]; then
+  echo "Access upgraded to push. Reconfiguring clone..."
+  rm -rf "$PUBLISH_REPO_DIR"
+  # Re-run first-time setup with push access
+fi
+if [ "$CURRENT_ACCESS" = "false" ] && [ "$CACHED_ACCESS" = "push" ]; then
+  echo "Push access revoked. Reconfiguring clone with fork..."
+  rm -rf "$PUBLISH_REPO_DIR"
+  # Re-run first-time setup with fork access
+fi
+```
+
+If the clone was removed due to an access change, re-run first-time setup above. Otherwise, freshen the clone to match the canonical upstream:
 
 ```bash
 cd "$PUBLISH_REPO_DIR"
