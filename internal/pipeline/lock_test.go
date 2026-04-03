@@ -299,6 +299,101 @@ func TestPromoteWorkingCLI_EmptyWorkingDir(t *testing.T) {
 	assert.Contains(t, err.Error(), "empty")
 }
 
+func TestPromoteWorkingCLI_PreservesOldOnFailure(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("PRINTING_PRESS_HOME", tmp)
+	t.Setenv("PRINTING_PRESS_SCOPE", "test-scope")
+	t.Setenv("PRINTING_PRESS_REPO_ROOT", tmp)
+
+	// Create existing library dir with old content.
+	libDir := filepath.Join(PublishedLibraryRoot(), "test-pp-cli")
+	require.NoError(t, os.MkdirAll(libDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(libDir, "go.mod"), []byte("module old\n\ngo 1.21\n"), 0o644))
+
+	state := NewStateWithRun("test", "/nonexistent/path", "run-004", "test-scope")
+
+	// Promote with a nonexistent working dir should fail.
+	err := PromoteWorkingCLI("test-pp-cli", "/nonexistent/path", state)
+	assert.Error(t, err)
+
+	// Old library should still be intact.
+	data, readErr := os.ReadFile(filepath.Join(libDir, "go.mod"))
+	require.NoError(t, readErr)
+	assert.Contains(t, string(data), "module old")
+}
+
+func TestPromoteWorkingCLI_RetryRestoresBackupBeforeFailure(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("PRINTING_PRESS_HOME", tmp)
+	t.Setenv("PRINTING_PRESS_SCOPE", "test-scope")
+	t.Setenv("PRINTING_PRESS_REPO_ROOT", tmp)
+
+	libDir := filepath.Join(PublishedLibraryRoot(), "test-pp-cli")
+	backupDir := libDir + ".old"
+	stagingDir := libDir + ".promoting"
+
+	// Simulate a crashed promote: backup survived, live library is missing,
+	// and stale staging debris is still present.
+	require.NoError(t, os.MkdirAll(backupDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(backupDir, "go.mod"), []byte("module old\n\ngo 1.21\n"), 0o644))
+	require.NoError(t, os.MkdirAll(stagingDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(stagingDir, "partial.txt"), []byte("partial"), 0o644))
+
+	workDir := filepath.Join(tmp, "working", "test-pp-cli")
+	require.NoError(t, os.MkdirAll(workDir, 0o755))
+	outside := filepath.Join(tmp, "outside.txt")
+	require.NoError(t, os.WriteFile(outside, []byte("outside"), 0o644))
+	require.NoError(t, os.Symlink(outside, filepath.Join(workDir, "bad-link.txt")))
+
+	state := NewStateWithRun("test", workDir, "run-004", "test-scope")
+
+	err := PromoteWorkingCLI("test-pp-cli", workDir, state)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "copying to staging directory")
+
+	// The previous published CLI should be restored before the retry fails.
+	data, readErr := os.ReadFile(filepath.Join(libDir, "go.mod"))
+	require.NoError(t, readErr)
+	assert.Contains(t, string(data), "module old")
+	_, statErr := os.Stat(backupDir)
+	assert.True(t, os.IsNotExist(statErr))
+}
+
+func TestPromoteWorkingCLI_ReleasesLockWhenStateSaveFails(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("PRINTING_PRESS_HOME", tmp)
+	t.Setenv("PRINTING_PRESS_SCOPE", "test-scope")
+	t.Setenv("PRINTING_PRESS_REPO_ROOT", tmp)
+
+	workDir := filepath.Join(tmp, "working", "test-pp-cli")
+	require.NoError(t, os.MkdirAll(workDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(workDir, "go.mod"), []byte("module test-pp-cli\n\ngo 1.21\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(workDir, "main.go"), []byte("package main\nfunc main() {}\n"), 0o644))
+
+	_, err := AcquireLock("test-pp-cli", "test-scope", false)
+	require.NoError(t, err)
+
+	state := NewStateWithRun("test", workDir, "run-005", "test-scope")
+
+	// Force state.Save() to fail after the library swap succeeds.
+	require.NoError(t, os.MkdirAll(filepath.Dir(state.PipelineDir()), 0o755))
+	require.NoError(t, os.WriteFile(state.PipelineDir(), []byte("not a directory"), 0o644))
+
+	err = PromoteWorkingCLI("test-pp-cli", workDir, state)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "cli promoted to")
+	assert.Contains(t, err.Error(), "state update failed")
+
+	libDir := filepath.Join(PublishedLibraryRoot(), "test-pp-cli")
+	_, err = os.Stat(filepath.Join(libDir, "go.mod"))
+	assert.NoError(t, err)
+	_, err = os.Stat(filepath.Join(libDir, "main.go"))
+	assert.NoError(t, err)
+
+	_, err = os.Stat(LockFilePath("test-pp-cli"))
+	assert.True(t, os.IsNotExist(err))
+}
+
 func TestIsStale(t *testing.T) {
 	fresh := &LockState{UpdatedAt: time.Now()}
 	assert.False(t, IsStale(fresh))

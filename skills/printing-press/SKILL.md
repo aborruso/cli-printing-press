@@ -290,6 +290,7 @@ Maintain a lightweight state file at `$STATE_FILE` so `/printing-press-score` ca
 Active mutable work lives under `$PRESS_RUNSTATE/`. Published CLIs live under `$PRESS_LIBRARY/`. Archived research and verification evidence live under `$PRESS_MANUSCRIPTS/<cli-name>/<run-id>/` (keyed by CLI name, e.g., `steam-web-pp-cli`, not the API slug). Do not write mutable run artifacts into the repo checkout.
 
 Examples of the current naming/layout to preserve:
+- `/printing-press emboss notion-pp-cli`
 - `discord-pp-cli/internal/store/store.go`
 - `linear-pp-cli stale --days 30 --team ENG`
 - `github.com/mvanhorn/discord-pp-cli`
@@ -1104,10 +1105,20 @@ Priority 1 (absorb - match everything):
 - Every feature from every competing tool, matched and beaten with agent-native output
 - This is NOT "top 3-5" - it is the FULL manifest
 
+**Lock heartbeat rule for long priority levels:** If Priority 1 has more than 5 features, update the lock heartbeat after every 3-5 features to prevent the 30-minute staleness threshold from triggering mid-build:
+```bash
+printing-press lock update --cli <api>-pp-cli --phase build-p1-progress
+```
+
 Priority 2 (transcend - build what nobody else has):
 - ALL transcendence features from Phase 1.5
 - The NOI commands that only work because everything is in SQLite
 - These are the commands that make someone say "I need this"
+
+**Lock heartbeat rule for Priority 2:** Same rule as Priority 1 — if Priority 2 has more than 3 transcendence features, update the heartbeat after every 2-3 features:
+```bash
+printing-press lock update --cli <api>-pp-cli --phase build-p2-progress
+```
 
 After completing Priority 2, update the lock heartbeat:
 ```bash
@@ -1188,12 +1199,17 @@ Interpretation:
 - `workflow-verify` tests the primary workflow end-to-end using the verification manifest (workflow_verify.yaml). Three verdicts: workflow-pass, workflow-fail, unverified-needs-auth
 - `scorecard` is the structural quality snapshot, not the source of truth by itself
 
-Fix order:
+Fix order (update heartbeat between each fix category to prevent stale lock during long fix loops):
 1. generation blockers or build breaks
 2. invalid paths and auth mismatches
 3. dead flags / dead functions / ghost tables
 4. broken dry-run and runtime command failures
 5. scorecard-only polish gaps
+
+After fixing each category, update the heartbeat:
+```bash
+printing-press lock update --cli <api>-pp-cli --phase shipcheck-fixing
+```
 
 <!-- CODEX_PHASE4_START -->
 When `CODEX_MODE` is true, read [references/codex-delegation.md](references/codex-delegation.md)
@@ -1257,7 +1273,7 @@ If the shipcheck verdict is `ship` or `ship-with-gaps`, promote the verified CLI
 printing-press lock promote --cli <api>-pp-cli --dir "$CLI_WORK_DIR"
 ```
 
-The `promote` command handles the full sequence: clears old library contents if they exist, copies the working directory to `$PRESS_LIBRARY/<api>-pp-cli`, writes the `.printing-press.json` manifest, updates the `CurrentRunPointer`, and releases the lock — all in one step.
+The `promote` command handles the full sequence: stages the working directory, atomically swaps it into `$PRESS_LIBRARY/<api>-pp-cli`, writes the `.printing-press.json` manifest, updates the `CurrentRunPointer`, and releases the lock — all in one step.
 
 If the shipcheck verdict is `hold`, the lock was already released in Phase 4. Do NOT promote. The working copy stays in `$CLI_WORK_DIR` and is not copied to the library.
 

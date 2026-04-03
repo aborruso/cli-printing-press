@@ -73,9 +73,14 @@ func AcquireLock(cliName, scope string, force bool) (*LockState, error) {
 	}
 
 	// Lock file exists — check if we can reclaim it.
+	// Retry read once to tolerate a concurrent atomic rename in writeLock.
 	existing, readErr := readLock(lockPath)
 	if readErr != nil {
-		// Can't read existing lock — try to remove and re-create.
+		time.Sleep(50 * time.Millisecond)
+		existing, readErr = readLock(lockPath)
+	}
+	if readErr != nil {
+		// Still can't read — file is genuinely corrupt. Remove and re-create.
 		_ = os.Remove(lockPath)
 		if err := writeLockExclusive(lockPath, lock); err != nil {
 			return nil, fmt.Errorf("acquiring lock after removing unreadable lock: %w", err)
@@ -163,6 +168,8 @@ func ReleaseLock(cliName string) error {
 
 // PromoteWorkingCLI copies a working CLI directory to the library, writes
 // the CLI manifest, updates the CurrentRunPointer, and releases the lock.
+// Uses a staging directory with atomic swap so the previous library copy
+// survives if any step fails.
 func PromoteWorkingCLI(cliName, workingDir string, state *PipelineState) error {
 	if workingDir == "" {
 		return fmt.Errorf("working directory is empty")
@@ -178,44 +185,90 @@ func PromoteWorkingCLI(cliName, workingDir string, state *PipelineState) error {
 	}
 
 	libraryDir := filepath.Join(PublishedLibraryRoot(), cliName)
-
-	// Clear existing library contents if present.
-	if _, err := os.Stat(libraryDir); err == nil {
-		if err := os.RemoveAll(libraryDir); err != nil {
-			return fmt.Errorf("clearing existing library directory: %w", err)
-		}
-	}
+	stagingDir := libraryDir + ".promoting"
+	backupDir := libraryDir + ".old"
 
 	// Ensure parent exists.
 	if err := os.MkdirAll(filepath.Dir(libraryDir), 0o755); err != nil {
 		return fmt.Errorf("creating library parent directory: %w", err)
 	}
 
-	// Copy working dir to library.
-	if err := CopyDir(workingDir, libraryDir); err != nil {
-		return fmt.Errorf("copying to library: %w", err)
+	// If a previous promote died after moving the live library to backup but
+	// before swapping in staging, restore that backup before attempting a retry.
+	if _, err := os.Stat(backupDir); err == nil {
+		if _, libErr := os.Stat(libraryDir); os.IsNotExist(libErr) {
+			if err := os.Rename(backupDir, libraryDir); err != nil {
+				return fmt.Errorf("restoring library from backup: %w", err)
+			}
+		} else if libErr != nil {
+			return fmt.Errorf("checking existing library directory: %w", libErr)
+		}
+	}
+
+	// Clean up any leftover staging dir from a previous failed promote.
+	_ = os.RemoveAll(stagingDir)
+
+	// Copy working dir to staging.
+	if err := CopyDir(workingDir, stagingDir); err != nil {
+		_ = os.RemoveAll(stagingDir)
+		return fmt.Errorf("copying to staging directory: %w", err)
 	}
 
 	// Update state to reflect promotion.
 	state.PublishedDir = libraryDir
 
-	// Write CLI manifest.
-	if err := writeCLIManifestForPublish(state, libraryDir); err != nil {
+	// Write CLI manifest into the staging copy.
+	if err := writeCLIManifestForPublish(state, stagingDir); err != nil {
+		_ = os.RemoveAll(stagingDir)
 		return fmt.Errorf("writing CLI manifest: %w", err)
 	}
 
+	// Remove any stale backup from a prior successful swap before we create a
+	// fresh backup for the current library contents.
+	if _, err := os.Stat(backupDir); err == nil {
+		if err := os.RemoveAll(backupDir); err != nil {
+			_ = os.RemoveAll(stagingDir)
+			return fmt.Errorf("removing stale backup directory: %w", err)
+		}
+	}
+
+	// Atomic swap: move old library aside, move staging into place.
+	if _, err := os.Stat(libraryDir); err == nil {
+		if err := os.Rename(libraryDir, backupDir); err != nil {
+			_ = os.RemoveAll(stagingDir)
+			return fmt.Errorf("backing up existing library directory: %w", err)
+		}
+	} else if !os.IsNotExist(err) {
+		_ = os.RemoveAll(stagingDir)
+		return fmt.Errorf("checking library directory before promote: %w", err)
+	}
+
+	if err := os.Rename(stagingDir, libraryDir); err != nil {
+		// Restore backup if the swap failed.
+		if _, statErr := os.Stat(backupDir); statErr == nil {
+			_ = os.Rename(backupDir, libraryDir)
+		}
+		return fmt.Errorf("promoting staging to library: %w", err)
+	}
+
+	// Swap succeeded — remove the backup.
+	_ = os.RemoveAll(backupDir)
+
 	// Update current run pointer so working_dir reflects library path.
 	state.WorkingDir = libraryDir
-	if err := state.Save(); err != nil {
-		return fmt.Errorf("updating state after promotion: %w", err)
-	}
+	saveErr := state.Save()
+	releaseErr := ReleaseLock(cliName)
 
-	// Release the lock.
-	if err := ReleaseLock(cliName); err != nil {
-		return fmt.Errorf("releasing lock after promotion: %w", err)
+	switch {
+	case saveErr != nil && releaseErr != nil:
+		return fmt.Errorf("cli promoted to %s, but state update failed: %v; lock release also failed: %w", libraryDir, saveErr, releaseErr)
+	case saveErr != nil:
+		return fmt.Errorf("cli promoted to %s, but state update failed: %w", libraryDir, saveErr)
+	case releaseErr != nil:
+		return fmt.Errorf("cli promoted to %s, but lock release failed: %w", libraryDir, releaseErr)
+	default:
+		return nil
 	}
-
-	return nil
 }
 
 // IsStale returns true if the lock's UpdatedAt is older than StaleLockThreshold.
@@ -240,7 +293,13 @@ func writeLock(path string, lock *LockState) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, data, 0o644)
+	// Write to a temp file in the same directory and rename for atomicity.
+	// This prevents concurrent readers from seeing truncated JSON.
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
 }
 
 func writeLockExclusive(path string, lock *LockState) error {

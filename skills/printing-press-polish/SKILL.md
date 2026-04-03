@@ -71,16 +71,23 @@ relative timestamps (e.g., "generated 2 hours ago").
 CLI_DIR="<resolved path>"
 CLI_NAME="$(basename "$CLI_DIR")"
 
-# Verify it's a valid Go CLI
-if [ ! -f "$CLI_DIR/go.mod" ]; then
-  # Check if there's an active build in progress for this CLI
-  _cli_base="$(basename "$CLI_DIR")"
-  _lock_json=$(printing-press lock status --cli "$_cli_base" --json 2>/dev/null)
-  if echo "$_lock_json" | grep -q '"held":true'; then
-    echo "CLI not in library yet — an active build is in progress."
-    echo "Wait for the build to finish and promote, then run polish."
+# Check if there's an active build lock — polish edits would be overwritten
+# when the running build promotes to library.
+_lock_json=$(printing-press lock status --cli "$CLI_NAME" --json 2>/dev/null)
+if echo "$_lock_json" | grep -q '"held".*true'; then
+  if echo "$_lock_json" | grep -q '"stale".*true'; then
+    echo "Warning: stale lock exists for $CLI_NAME (build may have crashed)."
+    echo "Proceeding with polish. Run 'printing-press lock release --cli $CLI_NAME' to clear."
+  else
+    echo "An active build is in progress for $CLI_NAME."
+    echo "Polish edits would be overwritten when the build promotes."
+    echo "Wait for the build to finish, then run polish."
     exit 1
   fi
+fi
+
+# Verify it's a valid Go CLI
+if [ ! -f "$CLI_DIR/go.mod" ]; then
   echo "Not a valid CLI directory: $CLI_DIR"
   exit 1
 fi
