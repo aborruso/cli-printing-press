@@ -1010,47 +1010,40 @@ func reclassifyPathParamModifiers(params []spec.Param) {
 		}
 		lowerName := strings.ToLower(p.Name)
 
-		// Decide whether this path param should be a flag instead of positional.
-		// Classification priority (first match wins):
-		reclassify := false
-
-		// 1. Has an enum → flag (user picks from a set)
+		// 1. Has an enum → flag
 		if len(p.Enum) > 0 {
-			reclassify = true
+			p.Positional = false
+			p.PathParam = true
 			if p.Default == nil {
-				p.Default = p.Enum[0]
+				p.Default = p.Enum[0] // default to first enum value
 			}
+			continue
 		}
 
 		// 2. Has a spec-declared default → flag
-		if !reclassify && p.Default != nil {
-			reclassify = true
+		if p.Default != nil {
+			p.Positional = false
+			p.PathParam = true
+			continue
 		}
 
 		// 3. Known pagination name → flag with default
-		if !reclassify {
-			if def, ok := paginationDefaults[lowerName]; ok {
-				reclassify = true
-				p.Default = def
-			}
-		}
-
-		// 4. Date/time format or name → flag
-		if !reclassify {
-			if p.Format == "date" || p.Format == "date-time" ||
-				strings.Contains(lowerName, "date") ||
-				strings.Contains(lowerName, "year") ||
-				strings.Contains(lowerName, "month") {
-				reclassify = true
-			}
-		}
-
-		if reclassify {
+		if def, ok := paginationDefaults[lowerName]; ok {
 			p.Positional = false
 			p.PathParam = true
-			// A path param is a URL segment — it can only be optional if a default
-			// value can fill its slot. No default → the user must provide a value.
-			p.Required = p.Default == nil
+			p.Default = def
+			continue
+		}
+
+		// 4. Date/time format → flag
+		if p.Format == "date" || p.Format == "date-time" ||
+			strings.Contains(lowerName, "date") ||
+			strings.Contains(lowerName, "year") ||
+			strings.Contains(lowerName, "month") {
+			p.Positional = false
+			p.PathParam = true
+			// No default — empty means "latest" or "all"
+			continue
 		}
 	}
 }
