@@ -46,6 +46,90 @@ func TestProfileMinimal(t *testing.T) {
 	assert.Equal(t, []string{"export", "import"}, profile.RecommendedFeatures())
 }
 
+func TestProfileEnumExpansion(t *testing.T) {
+	// Simulates the postman-explore pattern: one list endpoint serves multiple
+	// entity types via an enum query param (entityType=collection|workspace|api|flow).
+	// The profiler should expand this into 4 separate sync resources.
+	s := &spec.APISpec{
+		Name: "postman-explore",
+		Resources: map[string]spec.Resource{
+			"api": {
+				Endpoints: map[string]spec.Endpoint{
+					"list-network-entities": {
+						Method: "GET",
+						Path:   "/v1/api/networkentity",
+						Params: []spec.Param{
+							{
+								Name:     "entityType",
+								Type:     "string",
+								Required: true,
+								Enum:     []string{"collection", "workspace", "api", "flow"},
+							},
+							{Name: "limit", Type: "integer"},
+							{Name: "offset", Type: "integer"},
+						},
+						Pagination: &spec.Pagination{
+							CursorParam: "offset",
+							LimitParam:  "limit",
+						},
+						Response: spec.ResponseDef{Type: "array"},
+					},
+					"list-teams": {
+						Method: "GET",
+						Path:   "/v1/api/team",
+						Params: []spec.Param{
+							{Name: "limit", Type: "integer"},
+						},
+						Pagination: &spec.Pagination{
+							CursorParam: "offset",
+							LimitParam:  "limit",
+						},
+						Response: spec.ResponseDef{Type: "array"},
+					},
+				},
+			},
+		},
+	}
+
+	profile := Profile(s)
+
+	syncNames := make([]string, len(profile.SyncableResources))
+	syncPaths := make(map[string]string)
+	for i, sr := range profile.SyncableResources {
+		syncNames[i] = sr.Name
+		syncPaths[sr.Name] = sr.Path
+	}
+
+	// 4 resources: 3 unique enum values (collection, workspace, flow) + "api" which
+	// collides between the enum value and the teams endpoint resource name. The enum
+	// expansion produces "api" from entityType=api, and the teams endpoint also gets
+	// resource name "api" from the parser (shared /v1/api/ prefix). Whichever is
+	// processed first wins. Resource naming fix (#13) will give teams its own name.
+	assert.GreaterOrEqual(t, len(profile.SyncableResources), 4)
+	assert.Contains(t, syncNames, "collection")
+	assert.Contains(t, syncNames, "workspace")
+	assert.Contains(t, syncNames, "flow")
+
+	// Expanded paths should include the enum value as a query param
+	assert.Equal(t, "/v1/api/networkentity?entityType=collection", syncPaths["collection"])
+	assert.Equal(t, "/v1/api/networkentity?entityType=workspace", syncPaths["workspace"])
+}
+
+func TestProfileEnumExpansion_NoExpansionForNonEnum(t *testing.T) {
+	// Standard API without enum params should not be affected
+	profile := Profile(petstoreSpec())
+
+	syncNames := make([]string, len(profile.SyncableResources))
+	for i, sr := range profile.SyncableResources {
+		syncNames[i] = sr.Name
+	}
+
+	// Petstore has no enum query params — should NOT expand
+	assert.NotContains(t, syncNames, "available")
+	assert.NotContains(t, syncNames, "pending")
+	assert.NotContains(t, syncNames, "sold")
+}
+
 func TestToVisionaryPlan(t *testing.T) {
 	profile := Profile(discordSpec())
 	plan := profile.ToVisionaryPlan("discord")

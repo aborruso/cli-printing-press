@@ -233,6 +233,30 @@ func TestSanitizeResourceName(t *testing.T) {
 	}
 }
 
+func TestPathSegmentsStripsGenericAPIPrefix(t *testing.T) {
+	tests := []struct {
+		name      string
+		path      string
+		basePath  string
+		wantFirst string
+	}{
+		{"strips api prefix", "/v1/api/users", "", "users"},
+		{"strips apis prefix", "/v2/apis/teams", "", "teams"},
+		{"strips rest prefix", "/rest/orders", "", "orders"},
+		{"keeps non-generic prefix", "/v1/billing/invoices", "", "billing"},
+		{"keeps api when no sub-segments", "/api", "", "api"},
+		{"strips version then api", "/v1/api/networkentity", "", "networkentity"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			segments := pathSegmentsAfterBase(tt.path, tt.basePath)
+			if len(segments) > 0 {
+				assert.Equal(t, tt.wantFirst, segments[0])
+			}
+		})
+	}
+}
+
 func TestOperationIDToName(t *testing.T) {
 	tests := []struct {
 		operationID  string
