@@ -492,7 +492,17 @@ func resolveChromeProfile(w io.Writer, r io.Reader, domain, profileFlag string) 
 		fmt.Fprintf(w, "Auto-detected Chrome profile: %s (%s)\n", withCookies[0].DisplayName, withCookies[0].Dir)
 		return withCookies[0].Dir, nil
 	default:
-		// Multiple profiles have cookies — ask the user
+		// Multiple profiles have cookies.
+		// Non-interactive: pick the profile with the most cookies (already sorted).
+		// Interactive: ask the user.
+		if !isTerminal(w) {
+			// Non-interactive — auto-select the best profile (most cookies, first in sorted list)
+			selected := withCookies[0]
+			fmt.Fprintf(w, "Auto-selected Chrome profile: %s (%s, %d cookies)\n", selected.DisplayName, selected.Dir, selected.CookieCount)
+			fmt.Fprintf(w, "Use --profile to select a different profile.\n")
+			return selected.Dir, nil
+		}
+
 		fmt.Fprintf(w, "Multiple Chrome profiles have cookies for %s:\n", domain)
 		for i, p := range withCookies {
 			fmt.Fprintf(w, "  %d. %s (%s, %d cookies)\n", i+1, p.DisplayName, p.Dir, p.CookieCount)
@@ -681,12 +691,12 @@ func extractViaCookieScoop(domain, profileDir string) (string, error) {
 
 {{- if eq .Auth.Type "composed"}}
 // validateComposedAuth makes a lightweight test request to verify the session is still active.
+// Uses the API base URL — any authenticated endpoint returning 401/403 indicates expiry.
+// A non-auth error (404, 500, timeout) is treated as "can't validate, assume OK" to avoid
+// blocking auth on unrelated API issues.
 func validateComposedAuth(authHeader string) error {
-	// Use the API base URL + a lightweight endpoint to test auth.
-	// The Version endpoint requires auth headers on Pagliacci-style APIs,
-	// so a 401 means the session is expired.
-	testURL := "{{.BaseURL}}/Version"
-	req, err := http.NewRequest("GET", testURL, nil)
+	testURL := "{{.BaseURL}}"
+	req, err := http.NewRequest("HEAD", testURL, nil)
 	if err != nil {
 		return nil // can't validate, assume OK
 	}
