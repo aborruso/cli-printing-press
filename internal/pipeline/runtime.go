@@ -607,6 +607,8 @@ func runDataPipelineTest(binary, mode string, envFn func() []string) (bool, stri
 	// Parse table names from output (one per line, skip empty lines and header noise)
 	tables := parseSQLOutput(tablesOut)
 	if len(tables) == 0 {
+		// No domain tables found — ambiguous (could be minimal CLI or unusual naming).
+		// Don't fail the pipeline gate; report for human review.
 		return true, "WARN: sync completed but no domain tables found in sqlite_master"
 	}
 
@@ -623,7 +625,7 @@ func runDataPipelineTest(binary, mode string, envFn func() []string) (bool, stri
 				return true, fmt.Sprintf("PASS: %d domain tables, %s has %d rows", len(tables), table, count)
 			}
 		}
-		return true, fmt.Sprintf("WARN: %d domain tables created but 0 rows after sync (live mode)", len(tables))
+		return false, fmt.Sprintf("WARN: %d domain tables created but 0 rows after sync (live mode)", len(tables))
 	}
 
 	// Mock mode: tables created is sufficient (mock data is minimal)
@@ -692,6 +694,21 @@ func parseCountOutput(out []byte) int {
 		line = strings.TrimSpace(line)
 		if line == "" || line == "count(*)" || strings.HasPrefix(line, "---") {
 			continue
+		}
+		// Skip box-drawing borders and separators
+		if strings.HasPrefix(line, "┌") || strings.HasPrefix(line, "└") || strings.HasPrefix(line, "├") {
+			continue
+		}
+		if strings.Contains(line, "───") || strings.Contains(line, "===") {
+			continue
+		}
+		// Strip box-drawing pipe characters from cell content
+		if strings.HasPrefix(line, "│") {
+			line = strings.Trim(line, "│")
+			line = strings.TrimSpace(line)
+			if line == "" || line == "count(*)" {
+				continue
+			}
 		}
 		var n int
 		if _, err := fmt.Sscanf(line, "%d", &n); err == nil {

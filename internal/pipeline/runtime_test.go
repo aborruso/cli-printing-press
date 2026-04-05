@@ -316,6 +316,16 @@ func TestParseCountOutput(t *testing.T) {
 			input:    "error: no such table\n",
 			expected: 0,
 		},
+		{
+			name:     "box-drawn count",
+			input:    "┌──────────┐\n│ count(*) │\n├──────────┤\n│ 42       │\n└──────────┘\n",
+			expected: 42,
+		},
+		{
+			name:     "pipe-wrapped count no spaces",
+			input:    "│15│\n",
+			expected: 15,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
