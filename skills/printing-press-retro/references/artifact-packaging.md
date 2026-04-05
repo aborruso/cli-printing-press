@@ -33,21 +33,22 @@ Copy the CLI source if available. Skip if `CLI_DIR` is empty (manuscripts-only m
 ```bash
 if [ -n "$CLI_DIR" ] && [ -d "$CLI_DIR" ]; then
   mkdir -p "$STAGING_CLI_SOURCE"
-  rsync -a \
-    --exclude="$CLI_NAME" \
-    --exclude="vendor/" \
-    --exclude="go.sum" \
-    --exclude=".git/" \
-    --exclude="*.test" \
-    --exclude="*.exe" \
-    "$CLI_DIR/" "$STAGING_CLI_SOURCE/"
-
-  # If rsync is not available (rare but possible), fall back to:
-  # cp -r "$CLI_DIR/." "$STAGING_CLI_SOURCE/"
-  # rm -f "$STAGING_CLI_SOURCE/$CLI_NAME"
-  # rm -rf "$STAGING_CLI_SOURCE/vendor" "$STAGING_CLI_SOURCE/.git"
-  # rm -f "$STAGING_CLI_SOURCE/go.sum"
-  # find "$STAGING_CLI_SOURCE" -name "*.test" -o -name "*.exe" -delete 2>/dev/null
+  if command -v rsync >/dev/null 2>&1; then
+    rsync -a \
+      --exclude="$CLI_NAME" \
+      --exclude="vendor/" \
+      --exclude="go.sum" \
+      --exclude=".git/" \
+      --exclude="*.test" \
+      --exclude="*.exe" \
+      "$CLI_DIR/" "$STAGING_CLI_SOURCE/"
+  else
+    cp -r "$CLI_DIR/." "$STAGING_CLI_SOURCE/"
+    rm -f "$STAGING_CLI_SOURCE/$CLI_NAME"
+    rm -rf "$STAGING_CLI_SOURCE/vendor" "$STAGING_CLI_SOURCE/.git"
+    rm -f "$STAGING_CLI_SOURCE/go.sum"
+    find "$STAGING_CLI_SOURCE" \( -name "*.test" -o -name "*.exe" \) -delete 2>/dev/null
+  fi
 else
   echo "No CLI source directory available. Packaging manuscripts only."
   STAGING_CLI_SOURCE=""

@@ -130,7 +130,8 @@ echo "Manuscripts: $RUN_DIR"
 ### Resolve CLI directory
 
 ```bash
-CLI_NAME="${API_NAME}-pp-cli"
+API_SLUG="$API_NAME"
+CLI_NAME="${API_SLUG}-pp-cli"
 CLI_DIR="$PRESS_LIBRARY/$CLI_NAME"
 
 if [ ! -d "$CLI_DIR" ]; then
@@ -233,7 +234,7 @@ The scorer audit is not optional. Every finding from a score penalty must have a
 
 ## Phase 3: Classify findings
 
-For each finding from Phase 2, answer The Six Questions. Skip findings that only
+For each finding from Phase 2, answer these seven questions. Skip findings that only
 affect this specific API and wouldn't recur.
 
 **1. What happened?** One sentence — the symptom, not the fix.
@@ -363,9 +364,11 @@ Write the full retro document using this template:
 
 Save the retro to manuscript proofs (always):
 
+```bash
+RETRO_PROOF_PATH="$PRESS_MANUSCRIPTS/$API_NAME/$RUN_ID/proofs/$(date +%Y%m%d-%H%M%S)-retro-$CLI_NAME.md"
 ```
-$PRESS_MANUSCRIPTS/$API_NAME/$RUN_ID/proofs/$(date +%Y%m%d-%H%M%S)-retro-$CLI_NAME.md
-```
+
+This must complete before Phase 6 Step 1 copies the manuscripts directory to staging.
 
 ## Phase 5.5: Plannable work units
 

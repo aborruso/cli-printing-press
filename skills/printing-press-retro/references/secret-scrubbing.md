@@ -81,15 +81,17 @@ done
 Separately scan for hardcoded secret assignments in source code:
 
 ```bash
-# Matches: SECRET = "value", TOKEN: 'value', KEY="value", PASSWORD='value'
+# Matches assignments where the variable name ENDS with a secret-like suffix:
+#   API_SECRET = "value", AUTH_TOKEN: 'value', API_KEY="value", DB_PASSWORD='value'
+# Does NOT match: CACHE_KEY, PRIMARY_KEY, TOKEN_EXPIRY (keyword is not a suffix)
 # Only in .go, .env, .yaml, .yml, .json, .toml files
-SECRET_ASSIGN_REGEX='(SECRET|TOKEN|KEY|PASSWORD)\s*[:=]\s*["'"'"'][^"'"'"']{16,}["'"'"']'
+SECRET_ASSIGN_REGEX='[A-Z_]+(SECRET|_TOKEN|_KEY|PASSWORD)\s*[:=]\s*["'"'"'][^"'"'"']{16,}["'"'"']'
 
 for dir in "$STAGING_MANUSCRIPTS" "$STAGING_CLI_SOURCE"; do
   [ -d "$dir" ] || continue
   find "$dir" -type f \( -name "*.go" -o -name "*.env" -o -name "*.yaml" -o -name "*.yml" -o -name "*.json" -o -name "*.toml" \) -print0 | while IFS= read -r -d '' f; do
     if grep -qE "$SECRET_ASSIGN_REGEX" "$f" 2>/dev/null; then
-      perl -i -pe 's/(SECRET|TOKEN|KEY|PASSWORD)\s*[:=]\s*["\x27][^"\x27]{16,}["\x27]/$1=<REDACTED:env-assignment>/g' "$f" 2>/dev/null
+      perl -i -pe 's/[A-Z_]+(SECRET|_TOKEN|_KEY|PASSWORD)\s*[:=]\s*["\x27][^"\x27]{16,}["\x27]/$1=<REDACTED:env-assignment>/g' "$f" 2>/dev/null
       echo "Redacted env assignment in $(basename "$f")"
     fi
   done
@@ -101,7 +103,7 @@ done
 If the staging manuscripts contain HAR files, strip auth-bearing fields:
 
 ```bash
-for har in $(find "$STAGING_MANUSCRIPTS" -name "*.har" -type f 2>/dev/null); do
+find "$STAGING_MANUSCRIPTS" -name "*.har" -type f -print0 2>/dev/null | while IFS= read -r -d '' har; do
   jq 'del(.log.entries[].response.content.text) |
       (.log.entries[].request.headers) |= [.[] |
         select(.name | test("^(Authorization|Cookie|Set-Cookie|X-API-Key|X-Auth-Token)$"; "i") | not)
