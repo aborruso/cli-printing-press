@@ -45,17 +45,21 @@ func new{{camel .FuncPrefix}}{{camel .EndpointName}}Cmd(flags *rootFlags) *cobra
 {{- end}}
 {{- range .Endpoint.Params}}
 {{- if and .Required (not .Positional)}}
-			if flag{{camel .Name}} == {{zeroValForParam .Name .Type}} && !flags.dryRun {
+			if !cmd.Flags().Changed("{{flagName .Name}}") && !flags.dryRun {
 				return fmt.Errorf("required flag \"%s\" not set", "{{flagName .Name}}")
 			}
 {{- end}}
 {{- end}}
+{{- if or (eq .Endpoint.Method "POST") (eq .Endpoint.Method "PUT") (eq .Endpoint.Method "PATCH")}}
+			if !stdinBody {
 {{- range .Endpoint.Body}}
 {{- if .Required}}
-			if body{{camel .Name}} == {{zeroVal .Type}} && !flags.dryRun {
-				return fmt.Errorf("required flag \"%s\" not set", "{{flagName .Name}}")
-			}
+				if !cmd.Flags().Changed("{{flagName .Name}}") && !flags.dryRun {
+					return fmt.Errorf("required flag \"%s\" not set", "{{flagName .Name}}")
+				}
 {{- end}}
+{{- end}}
+			}
 {{- end}}
 			c, err := flags.newClient()
 			if err != nil {
