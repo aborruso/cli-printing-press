@@ -28,7 +28,7 @@ Even cookie-auth CLIs like Pagliacci Pizza have public endpoints (store finder, 
 ## Requirements Trace
 
 - R1. Per-endpoint `NoAuth` detection from OpenAPI specs (`security: []` override)
-- R2. MCP tool descriptions annotated with "(no auth required)" for public endpoints
+- R2. MCP tool descriptions annotated with `[No auth]` prefix for public endpoints
 - R3. CLI manifest extended with MCP metadata (binary name, tool counts, readiness level)
 - R4. README template includes MCP server install section
 - R5. Publish pipeline generates `smithery.yaml` marketplace metadata
@@ -180,14 +180,14 @@ Even cookie-auth CLIs like Pagliacci Pizza have public endpoints (store finder, 
 
 - [ ] **Unit 3: Annotate MCP tool descriptions with auth status**
 
-  **Goal:** MCP tool descriptions include "(no auth required)" for public endpoints, helping agents decide which tools to call without setup.
+  **Goal:** MCP tool descriptions include `[No auth]` prefix for public endpoints, helping agents decide which tools to call without setup.
 
   **Requirements:** R2
 
   **Dependencies:** Unit 1
 
   **Approach:**
-  The `oneline()` template function truncates descriptions at 120 characters. Naively appending `(no auth required)` after `oneline` would lose the annotation on long descriptions. Instead:
+  The `oneline()` template function truncates descriptions at 120 characters. Instead of appending an annotation that could be lost to truncation:
 
   1. Register a new template function `mcpDescription(desc string, noAuth bool) string` in `generator.go`'s FuncMap. This function prepends `[No auth] ` when `noAuth` is true, *then* calls `oneline()` internally on the combined string. This reuses all of oneline's sanitization (newline collapse, double-quote-to-single-quote replacement, backslash removal, whitespace normalization, truncation at 120 chars). Prepending ensures the auth signal is always visible even on long descriptions.
   2. Update the template to call: `mcplib.WithDescription("{{mcpDescription $endpoint.Description $endpoint.NoAuth}}")`
@@ -205,8 +205,8 @@ Even cookie-auth CLIs like Pagliacci Pizza have public endpoints (store finder, 
   **Pre-existing context:** `generator.go:439` creates `cmd/{name}-mcp/` and renders `main_mcp.go.tmpl` guarded by `VisionSet.MCP || true` (always runs). But `generator.go:579` renders `mcp_tools.go.tmpl` guarded by just `VisionSet.MCP`. The `mcpDescription` change only takes effect when `tools.go` is rendered. In practice, `VisionSet.MCP` is always true today (`|| true` override), but test scenarios should set the flag explicitly to be safe.
 
   **Test scenarios:**
-  - Happy path: Spec with `NoAuth: true` endpoint and `VisionSet.MCP = true` → generated `tools.go` contains `(no auth required)` in that tool's description
-  - Happy path: Spec with `NoAuth: false` endpoint → generated `tools.go` does NOT contain `(no auth required)` for that tool
+  - Happy path: Spec with `NoAuth: true` endpoint and `VisionSet.MCP = true` → generated `tools.go` contains `[No auth]` prefix in that tool's description
+  - Happy path: Spec with `NoAuth: false` endpoint → generated `tools.go` does NOT contain `[No auth]` for that tool
   - Happy path: Mixed spec (some public, some auth) → annotation appears only on public tools
   - Edge case: Spec with `Auth.Type == "none"` (all public) → all tool descriptions get the annotation
 
@@ -243,7 +243,7 @@ Even cookie-auth CLIs like Pagliacci Pizza have public endpoints (store finder, 
 
   **Data plumbing for `writeCLIManifestForPublish()`:** `PipelineState` does not carry the parsed spec. Re-parse from `spec.json` in the working directory via `openapi.Parse()`. Three callers: `publish.go:109` (PublishWorkingCLI), `lock.go:221` (PromoteWorkingCLI), and indirectly via the pipeline. All have access to the working directory. If `openapi.Parse()` fails or spec.json is missing (e.g., `--docs` runs), log a warning and leave MCP fields empty (non-blocking). The publish skill treats an empty `MCPBinary` as "omit the `mcp` block."
 
-  Add `naming.MCP(name string) string` returning `name + "-pp-mcp"` to `internal/naming/naming.go`. Update generator.go at both line 441 (directory path `cmd/{name}-mcp`) AND line 449 (template rendering path `cmd/{name}-mcp/main.go`) to use `naming.MCP()`.
+  Add `naming.MCP(name string) string` returning `name + "-pp-mcp"` to `internal/naming/naming.go`. Update both inline `g.Spec.Name+"-mcp"` references in generator.go (the directory path `cmd/{name}-mcp` and the template rendering path `cmd/{name}-mcp/main.go`) to use `naming.MCP()`.
 
   **MCP binary rename — all template occurrences:**
   - `goreleaser.yaml.tmpl`: build id (line 21), main path (line 22), binary name (line 23), brew install (line 54) — 4 occurrences of `{{.Name}}-mcp`
@@ -310,8 +310,7 @@ Even cookie-auth CLIs like Pagliacci Pizza have public endpoints (store finder, 
   **Approach:**
   Write a `smithery.yaml` as a companion function called from the same sites as `writeCLIManifestForPublish()`. There are three callers that must all produce smithery.yaml:
   1. `PublishWorkingCLI()` at `internal/pipeline/publish.go:109`
-  2. `PromoteWorkingCLI()` at `internal/pipeline/lock.go:221` (primary fullrun path)
-  3. Indirectly via the pipeline
+  2. `PromoteWorkingCLI()` at `internal/pipeline/lock.go:221` (primary fullrun path — the pipeline calls this)
 
   Content is derived from the manifest:
   - `name`: MCP binary name
@@ -361,6 +360,7 @@ Even cookie-auth CLIs like Pagliacci Pizza have public endpoints (store finder, 
   - Happy path: Scorecard for CLI with mixed auth endpoints → summary line shows correct split
   - Happy path: Scorecard for CLI with all-public endpoints → summary shows "X tools (X public, 0 auth-required)"
   - Edge case: Scorecard for CLI without MCP → no MCP line in summary
+  - Edge case: Scorecard for CLI directory without `.printing-press.json` (standalone usage) → no MCP line, no error
 
   **Verification:** `go test ./internal/pipeline/...` passes. Scorecard output includes MCP line when applicable.
 
@@ -372,7 +372,7 @@ Even cookie-auth CLIs like Pagliacci Pizza have public endpoints (store finder, 
 
   **Requirements:** R6
 
-  **Dependencies:** Unit 4 (uses same schema as manifest MCP fields)
+  **Dependencies:** Unit 4 (schema), Unit 9 (Pagliacci/Steam public tool counts)
 
   **Files:**
   - Modify: `registry.json` (in `mvanhorn/printing-press-library`)
@@ -412,7 +412,7 @@ Even cookie-auth CLIs like Pagliacci Pizza have public endpoints (store finder, 
 
 - [ ] **Unit 9: Annotate existing CLI MCP tool descriptions**
 
-  **Goal:** Each published CLI gets two changes: (1) MCP binary renamed from `{name}-mcp` to `{name}-pp-mcp` for collision avoidance, and (2) "(no auth required)" appended to descriptions of public endpoints in `internal/mcp/tools.go`. Targeted source edits — no regeneration.
+  **Goal:** Each published CLI gets two changes: (1) MCP binary renamed from `{name}-mcp` to `{name}-pp-mcp` for collision avoidance, and (2) `[No auth]` prefix added to descriptions of public endpoints in `internal/mcp/tools.go`. Targeted source edits — no regeneration.
 
   **Requirements:** R7
 
@@ -425,7 +425,8 @@ Even cookie-auth CLIs like Pagliacci Pizza have public endpoints (store finder, 
   - Modify: `internal/mcp/tools.go` (auth annotations)
   - Modify: `Makefile` (update MCP build target)
   - Modify: `.goreleaser.yaml` (update MCP binary name and build ID)
-  - Grep all files for old binary name (`{name}-mcp` without `-pp-`) to catch references in README.md, Dockerfiles, CI configs, and shell scripts
+  - Modify: `README.md` (update MCP binary name in install/usage instructions)
+  - Grep all files for old binary name (`{name}-mcp` without `-pp-`) to catch remaining references in Dockerfiles, CI configs, and shell scripts
 
   **Approach:**
   For each CLI, rename the MCP binary and annotate public endpoints:
@@ -449,7 +450,7 @@ Even cookie-auth CLIs like Pagliacci Pizza have public endpoints (store finder, 
   - The exact string format: prepend `[No auth] ` after the opening `"` in `mcplib.WithDescription("...")` calls
 
   **Test scenarios:**
-  - Happy path: espn tools.go → all WithDescription calls include "(no auth required)"
+  - Happy path: espn tools.go → all WithDescription calls prefixed with "[No auth] "
   - Happy path: pagliacci tools.go → verified-public tools annotated, unverified/auth-required tools not
   - Happy path: steam tools.go → verified-public tools annotated
   - Edge case: Annotations don't break Go compilation — verify with `go build ./...` in each CLI dir
