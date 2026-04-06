@@ -476,10 +476,10 @@ func (g *Generator) Generate() error {
 		return fmt.Errorf("rendering auth: %w", err)
 	}
 
-	// MCP server: generate cmd/{name}-mcp/ entry point and internal/mcp/ package
+	// MCP server: generate cmd/{name}-pp-mcp/ entry point and internal/mcp/ package
 	if g.VisionSet.MCP || true { // Always generate MCP for now
 		mcpDirs := []string{
-			filepath.Join("cmd", g.Spec.Name+"-mcp"),
+			filepath.Join("cmd", naming.MCP(g.Spec.Name)),
 			filepath.Join("internal", "mcp"),
 		}
 		for _, d := range mcpDirs {
@@ -487,7 +487,7 @@ func (g *Generator) Generate() error {
 				return fmt.Errorf("creating MCP dir %s: %w", d, err)
 			}
 		}
-		if err := g.renderTemplate("main_mcp.go.tmpl", filepath.Join("cmd", g.Spec.Name+"-mcp", "main.go"), g.Spec); err != nil {
+		if err := g.renderTemplate("main_mcp.go.tmpl", filepath.Join("cmd", naming.MCP(g.Spec.Name), "main.go"), g.Spec); err != nil {
 			return fmt.Errorf("rendering MCP main: %w", err)
 		}
 	}
