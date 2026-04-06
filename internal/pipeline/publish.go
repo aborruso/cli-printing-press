@@ -13,6 +13,7 @@ import (
 	"github.com/mvanhorn/cli-printing-press/catalog"
 	catalogpkg "github.com/mvanhorn/cli-printing-press/internal/catalog"
 	"github.com/mvanhorn/cli-printing-press/internal/naming"
+	"github.com/mvanhorn/cli-printing-press/internal/openapi"
 	"github.com/mvanhorn/cli-printing-press/internal/version"
 )
 
@@ -208,6 +209,18 @@ func writeCLIManifestForPublish(state *PipelineState, dir string) error {
 		if err == nil {
 			m.SpecChecksum = checksum
 		}
+
+		// Populate MCP metadata from the spec. Non-blocking: if parsing
+		// fails, MCP fields stay empty and smithery.yaml won't be written.
+		if parsed, parseErr := openapi.Parse(data); parseErr == nil {
+			m.MCPBinary = naming.MCP(parsed.Name)
+			total, public := CountMCPToolsFromSpec(parsed)
+			m.MCPToolCount = total
+			m.MCPPublicToolCount = public
+			m.MCPReady = computeMCPReady(parsed.Auth.Type, public)
+			m.AuthType = parsed.Auth.Type
+			m.AuthEnvVars = parsed.Auth.EnvVars
+		}
 	}
 
 	// Look up catalog entry by API name; empty string if not found.
@@ -215,6 +228,17 @@ func writeCLIManifestForPublish(state *PipelineState, dir string) error {
 		m.CatalogEntry = entry.Name
 		m.Category = entry.Category
 		m.Description = entry.Description
+	}
+
+	// Load novel features from research.json if available.
+	if research, err := LoadResearch(state.PipelineDir()); err == nil && research.NovelFeaturesBuilt != nil {
+		for _, nf := range *research.NovelFeaturesBuilt {
+			m.NovelFeatures = append(m.NovelFeatures, NovelFeatureManifest{
+				Name:        nf.Name,
+				Command:     nf.Command,
+				Description: nf.Description,
+			})
+		}
 	}
 
 	return WriteCLIManifest(dir, m)

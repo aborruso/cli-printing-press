@@ -85,13 +85,9 @@ func specChecksum(path string) (string, error) {
 	return "sha256:" + hex.EncodeToString(h[:]), nil
 }
 
-// GenerateManifestParams holds the information available at generate time
-// for writing a CLI manifest. Unlike PublishWorkingCLI (which has full
-// PipelineState), the standalone generate command only knows the spec
-// sources and output directory.
-// countMCPTools counts total endpoints and public (NoAuth) endpoints across
+// CountMCPToolsFromSpec counts total endpoints and public (NoAuth) endpoints across
 // all resources and sub-resources in a spec.
-func countMCPTools(s *spec.APISpec) (total, public int) {
+func CountMCPToolsFromSpec(s *spec.APISpec) (total, public int) {
 	for _, r := range s.Resources {
 		for _, e := range r.Endpoints {
 			total++
@@ -209,7 +205,7 @@ func WriteManifestForGenerate(p GenerateManifestParams) error {
 	// Populate MCP metadata from the parsed spec.
 	if p.Spec != nil {
 		m.MCPBinary = naming.MCP(p.Spec.Name)
-		total, public := countMCPTools(p.Spec)
+		total, public := CountMCPToolsFromSpec(p.Spec)
 		m.MCPToolCount = total
 		m.MCPPublicToolCount = public
 		m.MCPReady = computeMCPReady(p.Spec.Auth.Type, public)
