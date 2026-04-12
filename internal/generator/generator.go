@@ -175,6 +175,15 @@ func New(s *spec.APISpec, outputDir string) *Generator {
 			return strings.Join(safe, sep)
 		},
 		"goLiteral": func(v any) string {
+			// A nil default — common when the spec declares a field with no
+			// default value — must render as the Go keyword `nil`, not `<nil>`
+			// (which is what `fmt.Sprintf("%v", nil)` produces and which the
+			// Go compiler rejects). Without this branch, search.go and other
+			// generated files emit invalid syntax for spec fields with missing
+			// defaults.
+			if v == nil {
+				return "nil"
+			}
 			switch val := v.(type) {
 			case string:
 				return fmt.Sprintf("%q", val)
