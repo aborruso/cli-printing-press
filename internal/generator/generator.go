@@ -495,6 +495,7 @@ type readmeTemplateData struct {
 	DiscoveryPages []string
 	NovelFeatures  []NovelFeature
 	Narrative      *ReadmeNarrative
+	HasDataLayer   bool
 }
 
 func (g *Generator) readmeData() *readmeTemplateData {
@@ -512,6 +513,7 @@ func (g *Generator) readmeData() *readmeTemplateData {
 		DiscoveryPages: g.DiscoveryPages,
 		NovelFeatures:  g.NovelFeatures,
 		Narrative:      g.Narrative,
+		HasDataLayer:   g.VisionSet.Store,
 	}
 }
 
