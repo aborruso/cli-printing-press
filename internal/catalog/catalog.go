@@ -38,8 +38,9 @@ var validCategories = map[string]struct{}{
 }
 
 var validSpecFormats = map[string]struct{}{
-	"yaml": {},
-	"json": {},
+	"yaml":   {},
+	"json":   {},
+	"custom": {},
 }
 
 var validTiers = map[string]struct{}{
@@ -227,11 +228,11 @@ func (e *Entry) Validate() error {
 			return fmt.Errorf("spec_format is required")
 		}
 		if _, ok := validSpecFormats[e.SpecFormat]; !ok {
-			return fmt.Errorf("spec_format must be one of: yaml, json")
+			return fmt.Errorf("spec_format must be one of: %s", strings.Join(validSpecFormatNames(), ", "))
 		}
 	} else if e.SpecFormat != "" {
 		if _, ok := validSpecFormats[e.SpecFormat]; !ok {
-			return fmt.Errorf("spec_format must be one of: yaml, json")
+			return fmt.Errorf("spec_format must be one of: %s", strings.Join(validSpecFormatNames(), ", "))
 		}
 	}
 
@@ -293,6 +294,15 @@ func PublicCategories() []string {
 	}
 	sort.Strings(cats)
 	return cats
+}
+
+func validSpecFormatNames() []string {
+	formats := make([]string, 0, len(validSpecFormats))
+	for format := range validSpecFormats {
+		formats = append(formats, format)
+	}
+	sort.Strings(formats)
+	return formats
 }
 
 // IsPublicCategory reports whether category is allowed in user-facing workflows.

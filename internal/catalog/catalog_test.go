@@ -237,6 +237,22 @@ func TestSniffedEntryValid(t *testing.T) {
 	assert.NoError(t, entry.Validate())
 }
 
+func TestCustomSpecFormatValid(t *testing.T) {
+	f := false
+	entry := Entry{
+		Name:         "producthunt",
+		DisplayName:  "Product Hunt",
+		Description:  "Find, monitor, and export Product Hunt launches for launch research",
+		Category:     "marketing",
+		SpecURL:      "https://example.com/producthunt-spec.yaml",
+		SpecFormat:   "custom",
+		Tier:         "community",
+		SpecSource:   "sniffed",
+		AuthRequired: &f,
+	}
+	assert.NoError(t, entry.Validate())
+}
+
 func TestOptionalFieldsOmittedValid(t *testing.T) {
 	// spec_source, auth_required, and client_pattern should all be optional
 	entry := Entry{
@@ -383,6 +399,19 @@ func TestLookupFSFindsStripe(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "stripe", entry.Name)
 	assert.Equal(t, "https://raw.githubusercontent.com/stripe/openapi/master/openapi/spec3.json", entry.SpecURL)
+}
+
+func TestLookupFSFindsProductHunt(t *testing.T) {
+	entry, err := LookupFS(catalogfs.FS, "producthunt")
+	require.NoError(t, err)
+	assert.Equal(t, "producthunt", entry.Name)
+	assert.Equal(t, "Product Hunt", entry.DisplayName)
+	assert.Equal(t, "marketing", entry.Category)
+	assert.Equal(t, "community", entry.Tier)
+	assert.Equal(t, "custom", entry.SpecFormat)
+	assert.Equal(t, "sniffed", entry.SpecSource)
+	require.NotNil(t, entry.AuthRequired)
+	assert.False(t, *entry.AuthRequired)
 }
 
 func TestLookupFSNotFound(t *testing.T) {
