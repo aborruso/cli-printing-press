@@ -13,6 +13,7 @@ import (
 	"unicode"
 
 	"github.com/getkin/kin-openapi/openapi3"
+	"github.com/mvanhorn/cli-printing-press/internal/naming"
 	"github.com/mvanhorn/cli-printing-press/internal/spec"
 	"golang.org/x/text/cases"
 	"golang.org/x/text/language"
@@ -382,7 +383,7 @@ func mapAuth(doc *openapi3.T, name string) spec.AuthConfig {
 		}
 	}
 
-	envPrefix := strings.ToUpper(strings.ReplaceAll(name, "-", "_"))
+	envPrefix := naming.EnvPrefix(name)
 	switch auth.Type {
 	case "api_key":
 		// Use scheme name for more specific env var (e.g. BotToken -> DISCORD_BOT_TOKEN)
@@ -464,7 +465,7 @@ func inferQueryParamAuth(doc *openapi3.T, name string, fallback spec.AuthConfig)
 		return fallback
 	}
 
-	envPrefix := strings.ToUpper(strings.ReplaceAll(name, "-", "_"))
+	envPrefix := naming.EnvPrefix(name)
 	return spec.AuthConfig{
 		Type:    "api_key",
 		In:      "query",
@@ -685,7 +686,7 @@ func inferDescriptionAuth(doc *openapi3.T, name string, fallback spec.AuthConfig
 		return fallback
 	}
 
-	envPrefix := strings.ToUpper(strings.ReplaceAll(name, "-", "_"))
+	envPrefix := naming.EnvPrefix(name)
 
 	// Check bearer keywords first (stronger signal for Bearer-prefix auth).
 	// Scan all occurrences — a negated first mention ("does not require bearer")
@@ -762,7 +763,7 @@ func inferAuthHeaderParam(doc *openapi3.T, name string, fallback spec.AuthConfig
 		return fallback
 	}
 
-	envPrefix := strings.ToUpper(strings.ReplaceAll(name, "-", "_"))
+	envPrefix := naming.EnvPrefix(name)
 	return spec.AuthConfig{
 		Type:     "bearer_token",
 		Header:   "Authorization",
