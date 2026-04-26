@@ -1628,3 +1628,114 @@ resources:
 		assert.Equal(t, "menuId", ep.Params[1].Name)
 	})
 }
+
+func TestValidateReservedNames(t *testing.T) {
+	t.Parallel()
+
+	t.Run("reserved resource name is rejected with a clear rename hint", func(t *testing.T) {
+		t.Parallel()
+		// `feedback` collides with the reserved feedback.go template that
+		// declares the in-band agent feedback channel. Two collisions: file
+		// overwrite and `newFeedbackCmd` redeclaration.
+		input := `name: testapi
+base_url: https://api.example.com
+auth:
+  type: bearer_token
+  env_vars: [TESTAPI_TOKEN]
+resources:
+  feedback:
+    description: Customer feedback
+    endpoints:
+      submit:
+        method: POST
+        path: /feedback
+        description: Submit feedback
+`
+		_, err := ParseBytes([]byte(input))
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), `"feedback"`)
+		assert.Contains(t, err.Error(), "reserved Printing Press template")
+		assert.Contains(t, err.Error(), "Rename")
+	})
+
+	t.Run("auth resource name rejected", func(t *testing.T) {
+		t.Parallel()
+		input := `name: testapi
+base_url: https://api.example.com
+auth:
+  type: bearer_token
+  env_vars: [TESTAPI_TOKEN]
+resources:
+  auth:
+    description: Auth surface
+    endpoints:
+      list:
+        method: GET
+        path: /auth
+        description: list
+`
+		_, err := ParseBytes([]byte(input))
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), `"auth"`)
+	})
+
+	t.Run("non-reserved name with reserved-substring is allowed", func(t *testing.T) {
+		t.Parallel()
+		// "customer_feedback" contains "feedback" but is not itself reserved;
+		// we only reject exact matches because file emit is by exact name.
+		input := `name: testapi
+base_url: https://api.example.com
+auth:
+  type: bearer_token
+  env_vars: [TESTAPI_TOKEN]
+resources:
+  customer_feedback:
+    description: Customer feedback (renamed)
+    endpoints:
+      submit:
+        method: POST
+        path: /feedback
+        description: Submit feedback
+`
+		_, err := ParseBytes([]byte(input))
+		require.NoError(t, err)
+	})
+
+	t.Run("sub-resources are NOT subject to the reserved-name check", func(t *testing.T) {
+		t.Parallel()
+		// Sub-resources emit under <parent>_<sub>.go and produce
+		// new<Parent><Sub>Cmd identifiers, so they cannot collide with the
+		// single-file templates regardless of name.
+		input := `name: testapi
+base_url: https://api.example.com
+auth:
+  type: bearer_token
+  env_vars: [TESTAPI_TOKEN]
+resources:
+  customer:
+    description: Customer
+    sub_resources:
+      feedback:
+        description: Customer-feedback sub-resource
+        endpoints:
+          submit:
+            method: POST
+            path: /customer/feedback
+            description: Submit
+`
+		_, err := ParseBytes([]byte(input))
+		require.NoError(t, err)
+	})
+
+	t.Run("known clobbers are all in the set", func(t *testing.T) {
+		t.Parallel()
+		// Pin a baseline. Removing any of these from ReservedCLIResourceNames
+		// without first removing the corresponding generator template is a
+		// regression that will reintroduce silent overwrites.
+		mustReserve := []string{"feedback", "doctor", "auth", "helpers", "agent_context", "profile", "deliver", "which", "sync", "tail", "search", "client", "cache", "export", "import"}
+		for _, name := range mustReserve {
+			_, ok := ReservedCLIResourceNames[name]
+			assert.True(t, ok, "%q must remain in ReservedCLIResourceNames — losing it would reintroduce silent template overwrites", name)
+		}
+	})
+}

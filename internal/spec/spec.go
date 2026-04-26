@@ -460,10 +460,76 @@ func ParseBytes(data []byte) (*APISpec, error) {
 	}
 	s.expandOperations()
 	s.enrichPathParams()
+	if err := s.validateReservedNames(); err != nil {
+		return nil, err
+	}
 	if err := s.Validate(); err != nil {
 		return nil, fmt.Errorf("validation: %w", err)
 	}
 	return &s, nil
+}
+
+// ReservedCLIResourceNames is the set of resource names that would collide with
+// reserved single-file templates emitted into the printed CLI's internal/cli/
+// directory. Two collisions occur if a spec uses one of these as a resource
+// name: the resource template's <name>.go overwrites the reserved file (losing
+// helpers like FeedbackEndpointConfigured() from feedback.go), AND the
+// resource's `new<Name>Cmd` cobra-builder shadows the reserved template's
+// same-named function, breaking the build with a redeclaration error.
+//
+// Renaming the file alone is not enough; the function-name collision still
+// breaks the build. Reject at parse time and ask the author to rename the
+// resource (e.g., `feedback` → `customer_feedback`, `auth` → `accounts`).
+//
+// The contract is intentionally stable: removing an entry is allowed only when
+// the corresponding reserved template is also removed from the generator.
+var ReservedCLIResourceNames = map[string]struct{}{
+	"agent_context":    {},
+	"api_discovery":    {},
+	"auth":             {},
+	"auto_refresh":     {},
+	"cache":            {},
+	"channel_workflow": {},
+	"client":           {},
+	"data_source":      {},
+	"deliver":          {},
+	"doctor":           {},
+	"export":           {},
+	"feedback":         {},
+	"helpers":          {},
+	"html_extract":     {},
+	"import":           {},
+	"profile":          {},
+	"root":             {},
+	"search":           {},
+	"share_commands":   {},
+	"sync":             {},
+	"tail":             {},
+	"types":            {},
+	"which":            {},
+	"workflow":         {},
+}
+
+// validateReservedNames rejects specs whose top-level resource names would
+// collide with reserved Printing Press templates. Sub-resource names are not
+// checked because they emit under a parent prefix (`<parent>_<sub>.go`,
+// `new<Parent><Sub>Cmd`) that does not collide with single-file templates.
+func (s *APISpec) validateReservedNames() error {
+	for name := range s.Resources {
+		if _, reserved := ReservedCLIResourceNames[name]; reserved {
+			return fmt.Errorf("resource name %q collides with a reserved Printing Press template (would overwrite internal/cli/%s.go and produce a duplicate `new%sCmd` function). Rename the resource — common alternatives: %q, %q",
+				name, name, capitalizeFirst(name),
+				"customer_"+name, name+"_resource")
+		}
+	}
+	return nil
+}
+
+func capitalizeFirst(s string) string {
+	if s == "" {
+		return s
+	}
+	return strings.ToUpper(s[:1]) + s[1:]
 }
 
 // pathParamRe matches `{name}` placeholders in a path template. Names are
