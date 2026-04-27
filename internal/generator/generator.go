@@ -1859,6 +1859,44 @@ func validateRenderedArtifact(outPath, content string) error {
 			return fmt.Errorf("%s contains unsubstituted placeholder %q", outPath, marker)
 		}
 	}
+	if err := scanForControlBytes(outPath, content); err != nil {
+		return err
+	}
+	return nil
+}
+
+// scanForControlBytes rejects any rendered markdown that contains ASCII
+// control bytes outside the small set legitimately used in text:
+// 0x09 (tab), 0x0A (LF), 0x0D (CR). Everything else in 0x00-0x1F is
+// rejected with the file path, byte offset, and a hint about the most
+// likely cause.
+//
+// Why: research.json values flow through Go's encoding/json which honors
+// JSON escape sequences like "\b" (0x08 backspace), "\f" (0x0C form
+// feed), etc. When an agent author writes a regex literal as
+// `"command": "...\bGo\b..."` (intending the literal characters
+// `\` `b` `G` `o` `\` `b`) the JSON parser yields a string containing
+// real backspace bytes, and the template engine writes those bytes
+// straight into SKILL.md / README.md. The result renders as nothing in
+// most viewers — silent corruption.
+//
+// The fix runs at render time (not at JSON parse time) so it catches
+// every future class of escape mistake, not just the regex case that
+// surfaced it. A targeted check on `narrative.recipes[].command`
+// alone would only catch this one path.
+//
+// Surfaced by hackernews retro #350 finding F2.
+func scanForControlBytes(outPath, content string) error {
+	for i := 0; i < len(content); i++ {
+		b := content[i]
+		// Tab (0x09), LF (0x0A), CR (0x0D) are allowed in markdown.
+		// Everything else in 0x00-0x1F is forbidden.
+		if b > 0x1F || b == 0x09 || b == 0x0A || b == 0x0D {
+			continue
+		}
+		hint := "likely cause: a JSON-parsed field (e.g. narrative.recipes[].command) contained \"\\b\", \"\\f\", or another JSON escape that became a control byte. Double-escape backslashes in regex literals: \"\\\\b\" not \"\\b\"."
+		return fmt.Errorf("%s contains forbidden control byte 0x%02X at offset %d. %s", outPath, b, i, hint)
+	}
 	return nil
 }
 
