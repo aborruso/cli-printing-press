@@ -2862,9 +2862,11 @@ func TestGeneratedOutput_NoMarkFlagRequired(t *testing.T) {
 		require.NoError(t, err)
 		content := string(data)
 
-		// No command should use MarkFlagRequired (except import.go which is not verify-tested)
-		if e.Name() != "import.go" && strings.Contains(content, "MarkFlagRequired") {
-			t.Errorf("%s still contains MarkFlagRequired", e.Name())
+		// No command should call MarkFlagRequired (except import.go which is not verify-tested).
+		// Match call sites only (`.MarkFlagRequired(` with a quote arg) so that
+		// docstrings or comments mentioning the symbol don't false-positive.
+		if e.Name() != "import.go" && strings.Contains(content, `.MarkFlagRequired("`) {
+			t.Errorf("%s still calls MarkFlagRequired", e.Name())
 		}
 
 		// Track whether we find the RunE-based validation
