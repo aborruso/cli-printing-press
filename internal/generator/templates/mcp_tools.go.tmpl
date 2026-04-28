@@ -436,12 +436,8 @@ func handleContext(_ context.Context, _ mcplib.CallToolRequest) (*mcplib.CallToo
 	return mcplib.NewToolResultText(string(data)), nil
 }
 
-// RegisterNovelFeatureTools registers MCP tools for hand-written CLI features.
-// Each tool shells out to the companion CLI binary; the `args` parameter is
-// shell-split and appended to the feature's command spec. Bundled CLI users
-// get feature parity with the CLI via MCP without needing a separate install.
-// Empty body when the spec has no novel features — main_mcp still calls
-// this unconditionally so the wiring stays uniform across CLIs.
+// RegisterNovelFeatureTools registers MCP tools that shell out to the
+// companion CLI binary. Empty body when the spec has no novel features.
 func RegisterNovelFeatureTools(s *server.MCPServer) {
 {{- range .NovelFeatures}}
 	s.AddTool(
@@ -455,13 +451,8 @@ func RegisterNovelFeatureTools(s *server.MCPServer) {
 }
 {{- if .NovelFeatures}}
 
-// siblingCLIPath resolves the companion CLI binary via 3-tier fallback:
-// (1) sibling: directory of os.Executable() + "/{{.Name}}-pp-cli"
-// (2) {{envPrefix .Name}}_CLI_PATH env var
-// (3) exec.LookPath("{{.Name}}-pp-cli")
-// MCPB bundles ship both binaries side-by-side so tier 1 covers the
-// drag-drop install case; the env var is the escape hatch for non-standard
-// layouts; PATH is the fallback for users who installed via go install.
+// siblingCLIPath resolves the companion CLI via sibling-of-executable,
+// {{envPrefix .Name}}_CLI_PATH env var, then PATH.
 func siblingCLIPath() (string, error) {
 	const cliName = "{{.Name}}-pp-cli"
 	if exe, err := os.Executable(); err == nil {
@@ -476,20 +467,18 @@ func siblingCLIPath() (string, error) {
 	return exec.LookPath(cliName)
 }
 
-// shellOutToCLI returns an MCP tool handler that runs the CLI's commandSpec
-// subcommand with user-supplied args. Failure surfaces as a tool error
-// carrying the combined stdout+stderr; success returns the combined output
-// as text — agents that need structured data should pass --json in args.
+// shellOutToCLI returns an MCP tool handler that runs commandSpec against
+// the companion CLI. Resolves the binary path and pre-splits commandSpec
+// at registration so the per-call work is just user-arg split + exec.
 func shellOutToCLI(commandSpec string) server.ToolHandlerFunc {
+	cliPath, lookupErr := siblingCLIPath()
+	prefixArgs := splitShellArgs(commandSpec)
 	return func(ctx context.Context, req mcplib.CallToolRequest) (*mcplib.CallToolResult, error) {
-		userArgs, _ := req.GetArguments()["args"].(string)
-
-		cliPath, err := siblingCLIPath()
-		if err != nil {
-			return mcplib.NewToolResultError(fmt.Sprintf("companion CLI binary not found: %v\nTried sibling lookup, {{envPrefix .Name}}_CLI_PATH env var, and PATH.", err)), nil
+		if lookupErr != nil {
+			return mcplib.NewToolResultError(fmt.Sprintf("companion CLI binary not found: %v\nTried sibling lookup, {{envPrefix .Name}}_CLI_PATH env var, and PATH.", lookupErr)), nil
 		}
-
-		finalArgs := append(splitShellArgs(commandSpec), splitShellArgs(userArgs)...)
+		userArgs, _ := req.GetArguments()["args"].(string)
+		finalArgs := append(append([]string{}, prefixArgs...), splitShellArgs(userArgs)...)
 		cmd := exec.CommandContext(ctx, cliPath, finalArgs...)
 		out, err := cmd.CombinedOutput()
 		if err != nil {
@@ -499,10 +488,7 @@ func shellOutToCLI(commandSpec string) server.ToolHandlerFunc {
 	}
 }
 
-// splitShellArgs splits a string on whitespace, treating double-quoted
-// substrings as one token. Lighter than pulling in shellquote — we don't
-// need full shell-grammar support, just "the agent passed --domain
-// \"foo bar\" and we want one token for the value."
+// splitShellArgs whitespace-splits with double-quoted-token preservation.
 func splitShellArgs(s string) []string {
 	var tokens []string
 	var cur []rune

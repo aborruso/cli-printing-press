@@ -56,16 +56,6 @@ func BuildMCPBBundle(params BundleParams) error {
 		return errors.New("manifest server.entry_point is empty")
 	}
 
-	binFile, err := os.Open(params.BinaryPath)
-	if err != nil {
-		return fmt.Errorf("locating MCP binary at %s: %w", params.BinaryPath, err)
-	}
-	defer func() { _ = binFile.Close() }()
-	binStat, err := binFile.Stat()
-	if err != nil {
-		return fmt.Errorf("stat MCP binary: %w", err)
-	}
-
 	if err := os.MkdirAll(filepath.Dir(params.OutputPath), 0o755); err != nil {
 		return fmt.Errorf("creating bundle output dir: %w", err)
 	}
@@ -81,17 +71,13 @@ func BuildMCPBBundle(params BundleParams) error {
 		_ = zw.Close()
 		return fmt.Errorf("writing manifest into bundle: %w", err)
 	}
-	// Preserve executable bit so hosts that respect zip POSIX mode bits
-	// (Claude Desktop on macOS, MCP for Windows) can launch the binary
-	// directly without an extra chmod step. Stream the binary rather than
-	// loading the whole thing into RAM — bundles can be 15+ MB.
-	if err := writeZipReader(zw, manifest.Server.EntryPoint, binFile, binStat.Mode()&0o777); err != nil {
+	// Stream binaries (10-30 MB combined) instead of buffering. Preserve exec
+	// bits so hosts that honor POSIX zip mode (Claude Desktop on macOS, MCP
+	// for Windows) launch directly without chmod.
+	if err := zipFile(zw, manifest.Server.EntryPoint, params.BinaryPath); err != nil {
 		_ = zw.Close()
-		return fmt.Errorf("writing binary into bundle: %w", err)
+		return fmt.Errorf("writing MCP binary into bundle: %w", err)
 	}
-	// Optionally bundle the companion CLI binary for novel-feature shell-out.
-	// Path inside the zip mirrors the MCP binary's `bin/<name>` shape so the
-	// MCP's siblingCLIPath() helper finds it via dirname(os.Executable()).
 	if params.CLIBinaryPath != "" && manifest.CLIBinary != "" {
 		if err := zipFile(zw, "bin/"+manifest.CLIBinary, params.CLIBinaryPath); err != nil {
 			_ = zw.Close()
@@ -104,9 +90,7 @@ func BuildMCPBBundle(params BundleParams) error {
 	return nil
 }
 
-// zipFile streams srcPath into the zip writer at name, preserving the
-// executable mode bits. Mirrors the MCP-binary streaming logic above so
-// the CLI binary doesn't get loaded into RAM either.
+// zipFile streams srcPath into the zip at name, preserving exec bits.
 func zipFile(zw *zip.Writer, name, srcPath string) error {
 	src, err := os.Open(srcPath)
 	if err != nil {

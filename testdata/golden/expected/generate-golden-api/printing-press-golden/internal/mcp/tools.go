@@ -327,11 +327,7 @@ func handleContext(_ context.Context, _ mcplib.CallToolRequest) (*mcplib.CallToo
 	return mcplib.NewToolResultText(string(data)), nil
 }
 
-// RegisterNovelFeatureTools registers MCP tools for hand-written CLI features.
-// Each tool shells out to the companion CLI binary; the `args` parameter is
-// shell-split and appended to the feature's command spec. Bundled CLI users
-// get feature parity with the CLI via MCP without needing a separate install.
-// Empty body when the spec has no novel features — main_mcp still calls
-// this unconditionally so the wiring stays uniform across CLIs.
+// RegisterNovelFeatureTools registers MCP tools that shell out to the
+// companion CLI binary. Empty body when the spec has no novel features.
 func RegisterNovelFeatureTools(s *server.MCPServer) {
 }

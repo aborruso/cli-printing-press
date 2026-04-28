@@ -12,6 +12,7 @@ import (
 
 	"github.com/mvanhorn/cli-printing-press/v2/internal/pipeline"
 	"github.com/spf13/cobra"
+	"golang.org/x/sync/errgroup"
 )
 
 func newBundleCmd() *cobra.Command {
@@ -81,23 +82,11 @@ from another build pipeline.`,
 			if binaryPath == "" {
 				binaryPath = pipeline.StagedMCPBinaryPath(cliDir, manifest.Name)
 			}
-
-			if !skipBuild {
-				if err := buildMCPBBinary(cliDir, manifest.Name, binaryPath, goos, goarch); err != nil {
-					return fmt.Errorf("building MCP binary: %w", err)
-				}
-			}
-
-			// Optionally build/locate the companion CLI binary so the bundle
-			// includes both. siblingCLIPath() inside the MCP server then finds
-			// the CLI without the user needing PATH or a separate go install.
 			if cliBinaryPath == "" && manifest.CLIBinary != "" {
 				cliBinaryPath = pipeline.StagedMCPBinaryPath(cliDir, manifest.CLIBinary)
 			}
-			if !cliSkipBuild && manifest.CLIBinary != "" {
-				if err := buildMCPBBinary(cliDir, manifest.CLIBinary, cliBinaryPath, goos, goarch); err != nil {
-					return fmt.Errorf("building CLI binary: %w", err)
-				}
+			if err := buildBundleBinaries(cliDir, manifest.Name, binaryPath, skipBuild, manifest.CLIBinary, cliBinaryPath, cliSkipBuild, goos, goarch); err != nil {
+				return err
 			}
 
 			if output == "" {
@@ -159,21 +148,13 @@ func autoBundleForHost(cliDir string, w io.Writer) {
 		return
 	}
 	binaryPath := pipeline.StagedMCPBinaryPath(cliDir, manifest.Name)
-	if err := buildMCPBBinary(cliDir, manifest.Name, binaryPath, runtime.GOOS, runtime.GOARCH); err != nil {
-		fmt.Fprintf(w, "warning: could not build MCP binary for bundle: %v\n", err)
-		return
-	}
-	// Build the companion CLI binary too, so siblingCLIPath() inside the MCP
-	// finds it for novel-feature shell-out without the user needing PATH or
-	// a separate go install. Skipped when the manifest declares no cli_binary
-	// (older CLIs / generators that pre-date the dual-binary bundle).
 	cliBinaryPath := ""
 	if manifest.CLIBinary != "" {
 		cliBinaryPath = pipeline.StagedMCPBinaryPath(cliDir, manifest.CLIBinary)
-		if err := buildMCPBBinary(cliDir, manifest.CLIBinary, cliBinaryPath, runtime.GOOS, runtime.GOARCH); err != nil {
-			fmt.Fprintf(w, "warning: could not build companion CLI binary: %v\n", err)
-			return
-		}
+	}
+	if err := buildBundleBinaries(cliDir, manifest.Name, binaryPath, false, manifest.CLIBinary, cliBinaryPath, false, runtime.GOOS, runtime.GOARCH); err != nil {
+		fmt.Fprintf(w, "warning: %v\n", err)
+		return
 	}
 	output := pipeline.DefaultBundleOutputPath(cliDir, manifest.Name, runtime.GOOS, runtime.GOARCH)
 	if err := pipeline.BuildMCPBBundle(pipeline.BundleParams{
@@ -186,6 +167,31 @@ func autoBundleForHost(cliDir string, w io.Writer) {
 		return
 	}
 	fmt.Fprintf(w, "Bundled %s\n", output)
+}
+
+// buildBundleBinaries compiles the MCP and (optionally) CLI binaries
+// concurrently. Go's build cache is concurrency-safe and the two packages
+// are disjoint, so running serial doubles bundle latency for no reason.
+// Returns once both finish; the first error wins.
+func buildBundleBinaries(cliDir, mcpName, mcpPath string, skipMCP bool, cliName, cliPath string, skipCLI bool, goos, goarch string) error {
+	var g errgroup.Group
+	if !skipMCP {
+		g.Go(func() error {
+			if err := buildMCPBBinary(cliDir, mcpName, mcpPath, goos, goarch); err != nil {
+				return fmt.Errorf("building MCP binary: %w", err)
+			}
+			return nil
+		})
+	}
+	if !skipCLI && cliName != "" {
+		g.Go(func() error {
+			if err := buildMCPBBinary(cliDir, cliName, cliPath, goos, goarch); err != nil {
+				return fmt.Errorf("building CLI binary: %w", err)
+			}
+			return nil
+		})
+	}
+	return g.Wait()
 }
 
 // resolvePlatform parses an optional "<os>/<arch>" string and falls back

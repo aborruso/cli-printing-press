@@ -167,16 +167,11 @@ func buildMCPBManifest(m CLIManifest) MCPBManifest {
 		displayName = m.APIName
 	}
 
-	cliBinary := ""
-	if m.CLIName != "" {
-		cliBinary = m.CLIName
-	}
-
 	return MCPBManifest{
 		ManifestVersion: MCPBManifestVersion,
 		Name:            m.MCPBinary,
 		DisplayName:     displayName,
-		CLIBinary:       cliBinary,
+		CLIBinary:       m.CLIName,
 		// Bundle version tracks the printing-press release that produced
 		// it so Claude Desktop's update detection sees a fresh value on
 		// regeneration. A hardcoded "1.0.0" would defeat the host's
