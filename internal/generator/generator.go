@@ -1190,9 +1190,19 @@ func (g *Generator) Generate() error {
 	return g.renderVisionAndRootFiles(g.PromotedCommands, g.PromotedResourceNames)
 }
 
-// GenerateMCPSurfaceOnly rewrites the generated MCP entrypoint, tools package,
-// and cobratree helpers without touching the printed CLI's command files.
-func (g *Generator) GenerateMCPSurfaceOnly() error {
+// GenerateMCPSurface rewrites the generated MCP entrypoint, tools package,
+// cobratree helpers, AND the generator-reserved cliutil package without
+// touching the printed CLI's command files. The cliutil package is
+// included because the MCP template references helpers (SanitizeErrorBody,
+// LooksLikeAuthError) that older library CLIs lack — leaving cliutil
+// stale produces "undefined: cliutil.SanitizeErrorBody" build errors on
+// regenerated tools.go. Per AGENTS.md, internal/cliutil is generator-
+// reserved (agents must not hand-edit it), so unconditional regen here
+// is intentionally asymmetric vs the marker-checked tools.go/handlers.go
+// paths in mcp-sync. Spec-conditional cliutil files (freshness,
+// autoRefresh) stay in renderOptionalSupportFiles so they don't get
+// emitted when the spec opts out.
+func (g *Generator) GenerateMCPSurface() error {
 	if err := g.prepareOutput(); err != nil {
 		return err
 	}
@@ -1204,15 +1214,15 @@ func (g *Generator) GenerateMCPSurfaceOnly() error {
 		"cobratree/shellout.go.tmpl": filepath.Join("internal", "mcp", "cobratree", "shellout.go"),
 		"cobratree/cli_path.go.tmpl": filepath.Join("internal", "mcp", "cobratree", "cli_path.go"),
 		"cobratree/names.go.tmpl":    filepath.Join("internal", "mcp", "cobratree", "names.go"),
-		// cliutil files. The MCP template references cliutil helpers
-		// (SanitizeErrorBody, LooksLikeAuthError, etc.) that newer
-		// generator releases have added. Library CLIs printed before
-		// those helpers existed have stale cliutil packages, and the
-		// regenerated tools.go fails to build with "undefined:
-		// cliutil.SanitizeErrorBody". Regenerating the cliutil package
-		// alongside the MCP surface keeps helpers current. Per AGENTS.md,
-		// internal/cliutil is generator-reserved — agents are not
-		// supposed to hand-edit it, so unconditional regen is safe.
+		// cliutil files. Deliberately asymmetric with the marker-checked
+		// tools.go / handlers.go / root.go paths elsewhere in mcp-sync:
+		// those files can carry hand-edits and require explicit
+		// confirmation before overwrite, but cliutil is generator-
+		// reserved per AGENTS.md and unconditional regen is the
+		// expected contract. Without this, library CLIs whose cliutil
+		// predates a helper the new MCP template uses (SanitizeErrorBody,
+		// LooksLikeAuthError) fail to build after migration. See the
+		// GenerateMCPSurface doc comment for the full rationale.
 		"cliutil_fanout.go.tmpl":    filepath.Join("internal", "cliutil", "fanout.go"),
 		"cliutil_text.go.tmpl":      filepath.Join("internal", "cliutil", "text.go"),
 		"cliutil_probe.go.tmpl":     filepath.Join("internal", "cliutil", "probe.go"),

@@ -112,7 +112,7 @@ func Sync(cliDir string, opts Options) (Result, error) {
 		gen := generator.New(parsed, cliDir)
 		gen.NovelFeatures = features
 		gen.ModulePath = modulePath
-		if err := gen.GenerateMCPSurfaceOnly(); err != nil {
+		if err := gen.GenerateMCPSurface(); err != nil {
 			return Result{}, fmt.Errorf("rendering MCP surface: %w", err)
 		}
 	}
