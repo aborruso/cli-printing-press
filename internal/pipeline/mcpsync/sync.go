@@ -272,6 +272,34 @@ func ensureEndpointAnnotation(path, annotationLine string) error {
 	return writeFileAtomic(path, []byte(next))
 }
 
+// pkgContainsDecl reports whether any .go file in pkgDir contains decl.
+// Used to detect opt-in template features (suggestFlag, Deliver) whose
+// supporting code lives in sibling files rather than root.go itself.
+// Skips _test.go files so test fixtures don't trigger false positives.
+func pkgContainsDecl(pkgDir, decl string) (bool, error) {
+	entries, err := os.ReadDir(pkgDir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return false, nil
+		}
+		return false, err
+	}
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(pkgDir, name))
+		if err != nil {
+			return false, err
+		}
+		if strings.Contains(string(data), decl) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 func ensureRootCmdExport(cliDir string) error {
 	path := filepath.Join(cliDir, "internal", "cli", "root.go")
 	data, err := os.ReadFile(path)
@@ -298,8 +326,18 @@ func ensureRootCmdExport(cliDir string) error {
 	// Skip prolog blocks whose supporting types/functions aren't in the
 	// existing source — older library CLIs predate suggestFlag and
 	// Deliver and would otherwise fail to build with "undefined" errors.
-	hasSuggestFlag := strings.Contains(src, "func suggestFlag(")
-	hasDeliver := strings.Contains(src, "func Deliver(") && strings.Contains(src, "deliverBuf")
+	// Scan the whole cli package, not just root.go: by convention the
+	// generator emits suggestFlag in helpers.go and Deliver in deliver.go.
+	pkgDir := filepath.Join(cliDir, "internal", "cli")
+	hasSuggestFlag, err := pkgContainsDecl(pkgDir, "func suggestFlag(")
+	if err != nil {
+		return fmt.Errorf("scanning cli package for suggestFlag: %w", err)
+	}
+	hasDeliverFunc, err := pkgContainsDecl(pkgDir, "func Deliver(")
+	if err != nil {
+		return fmt.Errorf("scanning cli package for Deliver: %w", err)
+	}
+	hasDeliver := hasDeliverFunc && strings.Contains(src, "deliverBuf")
 
 	suggestBlock := ""
 	if hasSuggestFlag {
