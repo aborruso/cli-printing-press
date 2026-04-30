@@ -21,6 +21,8 @@ allowed-tools:
 
 # /printing-press-polish
 
+> **STEP 0 — DO THIS BEFORE ANYTHING ELSE.** Call `ToolSearch` with query `select:AskUserQuestion` right now to load the tool schema. Do this on every invocation. This skill runs in a forked context where `AskUserQuestion` is a deferred tool — its schema is NOT visible in your starting tool list, but the tool IS available once loaded. If you skip this step, every later question site (divergence check, multi-match resolve, publish offer) will see "AskUserQuestion not available" in the tool list and incorrectly fall back to plain-text "reply 1 or 2" prompts that the user cannot answer (their reply lands in the parent session, never reaches this fork, and the workflow stalls indefinitely). Loading the schema once at start makes every later prompt site work. Do not interpret the absence of AskUserQuestion from the initial tool list as evidence it is unavailable; that is what deferred-tool means.
+
 Polish a generated CLI so it passes verification and is ready to publish.
 
 The retro improves the Printing Press. Polish improves the generated CLI. This skill runs in a forked context (`context: fork`) so its diagnostic and fix loop doesn't pollute the caller — the diagnostic spam, fix iterations, and re-diagnose noise stay scoped to the polish session, and the caller receives a clean summary.
@@ -48,7 +50,7 @@ PRESS_HOME="$HOME/printing-press"
 PRESS_LIBRARY="$PRESS_HOME/library"
 ```
 
-**`AskUserQuestion` is a deferred tool.** Before the first use in this session, load its schema with `ToolSearch select:AskUserQuestion`. Without that load step the tool's schema isn't visible in the tool list and it appears unavailable — do not fall back to plain-text "reply 1 or 2" prompts when running in a forked context. Plain-text replies land in the parent session, never reach this fork, and the workflow stalls. Load AskUserQuestion eagerly during Setup so every later prompt site (resolve CLI, divergence check, publish offer) just works.
+**Load `AskUserQuestion` now if you haven't already** (see Step 0 at the top of this file). Run `ToolSearch select:AskUserQuestion`. This is required before any prompt site fires.
 
 ### Public-library hint
 
@@ -157,7 +159,7 @@ Outcomes:
 - **No clone found** → user doesn't have public locally. State this explicitly ("public library not found locally; proceeding on internal as canonical") and continue.
 - **Clone found but doesn't contain this CLI** → never published or under a different name. State this and continue.
 - **Found and diff is empty** → in sync. State this and continue.
-- **Found and divergent** → **stop**. Do not run Phase 1 diagnostics yet. List the divergent files for the user. Ask via AskUserQuestion: **sync public→internal**, or **proceed without syncing**. If the user picks sync, copy public's version of the divergent files into internal, then continue polish on the synced internal copy.
+- **Found and divergent** → **stop**. Do not run Phase 1 diagnostics yet. List the divergent files for the user. Ask via AskUserQuestion (deferred — load it via `ToolSearch select:AskUserQuestion` first if you haven't already): **sync public→internal**, or **proceed without syncing**. Do NOT fall back to "reply 1 or 2" plain-text prompts; the user cannot answer them in this forked context. If the user picks sync, copy public's version of the divergent files into internal, then continue polish on the synced internal copy.
 
 Before showing the sync prompt, check whether internal has files modified after its `.printing-press.json` timestamp (the user has been polishing locally without publishing). If yes, hedge the prompt explicitly: syncing will overwrite their pending local work. Let them decide whether to keep their local edits or pull public's.
 
@@ -494,7 +496,7 @@ The three lists serve different purposes:
 
 If `ship` or `ship-with-gaps`:
 
-Present via `AskUserQuestion`:
+Present via `AskUserQuestion` (deferred — `ToolSearch select:AskUserQuestion` first if you haven't loaded it; do NOT fall back to plain-text "reply 1/2/3" prompts):
 
 > "<CLI_NAME> polished: scorecard XX/100, verify XX%. Ready to publish?"
 >
