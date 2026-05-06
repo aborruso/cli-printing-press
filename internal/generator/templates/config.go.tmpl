@@ -109,6 +109,17 @@ func Load(configPath string) (*Config, error) {
 	}
 {{- end}}
 {{- end}}
+{{- if eq .Auth.EffectiveOAuth2Grant "refresh_token"}}
+	if v := os.Getenv("{{refreshTokenAuthFlowInput .Auth "client_id"}}"); v != "" {
+		cfg.ClientID = v
+	}
+	if v := os.Getenv("{{refreshTokenAuthFlowInput .Auth "client_secret"}}"); v != "" {
+		cfg.ClientSecret = v
+	}
+	if v := os.Getenv("{{refreshTokenAuthFlowInput .Auth "refresh_token"}}"); v != "" {
+		cfg.RefreshToken = v
+	}
+{{- end}}
 
 	// Base URL override (used by printing-press verify to point at mock/test servers)
 	if v := os.Getenv("{{envName .Name}}_BASE_URL"); v != "" {

@@ -1,0 +1,14 @@
+# Locks the OAuth2 refresh_token auth shape contract end-to-end.
+# The fixture declares only auth_flow_input env vars; artifacts prove
+# canonical request credential selection stays nil, setup env vars map into
+# Config.ClientID/ClientSecret/RefreshToken, and the client mints/retries via
+# refresh_token without emitting browser login UX.
+
+printing-press-oauth2-refresh-token/README.md
+printing-press-oauth2-refresh-token/SKILL.md
+printing-press-oauth2-refresh-token/internal/cli/auth.go
+printing-press-oauth2-refresh-token/internal/cli/doctor.go
+printing-press-oauth2-refresh-token/internal/cli/helpers.go
+printing-press-oauth2-refresh-token/internal/client/client.go
+printing-press-oauth2-refresh-token/internal/config/config.go
+printing-press-oauth2-refresh-token/internal/mcp/tools.go

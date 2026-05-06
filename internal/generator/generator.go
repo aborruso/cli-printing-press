@@ -216,16 +216,20 @@ func New(s *spec.APISpec, outputDir string) *Generator {
 		"authHarvestedEnvHint":   authHarvestedEnvHint,
 		"hasAuthEnvVarKind":      hasAuthEnvVarKind,
 		"isRequestAuthEnvVar":    isRequestAuthEnvVar,
-		"effectiveTier":          effectiveTier,
-		"effectiveSubTier":       effectiveSubTier,
-		"add":                    func(a, b int) int { return a + b },
-		"oneline":                naming.OneLine,
-		"composeMCPDesc":         composeMCPDesc,
-		"composeMCPSubDesc":      composeMCPSubDesc,
-		"mcpParamDesc":           g.mcpParamDescription,
-		"flagName":               flagName,
-		"paramIdent":             paramIdent,
-		"safeTypeName":           safeTypeName,
+		"refreshTokenAuthFlowInput": func(auth spec.AuthConfig, role string) string {
+			envVar, _ := refreshTokenAuthFlowInput(auth, role)
+			return envVar.Name
+		},
+		"effectiveTier":     effectiveTier,
+		"effectiveSubTier":  effectiveSubTier,
+		"add":               func(a, b int) int { return a + b },
+		"oneline":           naming.OneLine,
+		"composeMCPDesc":    composeMCPDesc,
+		"composeMCPSubDesc": composeMCPSubDesc,
+		"mcpParamDesc":      g.mcpParamDescription,
+		"flagName":          flagName,
+		"paramIdent":        paramIdent,
+		"safeTypeName":      safeTypeName,
 		"hasNonScalarType": func(types map[string]spec.TypeDef) bool {
 			for _, td := range types {
 				for _, f := range td.Fields {
@@ -837,6 +841,53 @@ func hasAuthEnvVarKind(envVarSpecs []spec.AuthEnvVar, kind string) bool {
 
 func isRequestAuthEnvVar(envVar spec.AuthEnvVar) bool {
 	return envVar.IsRequestCredential()
+}
+
+func validateRefreshTokenAuthFlowInputs(auth spec.AuthConfig) error {
+	if auth.EffectiveOAuth2Grant() != spec.OAuth2GrantRefreshToken {
+		return nil
+	}
+	for _, role := range []string{"client_id", "client_secret", "refresh_token"} {
+		if _, err := refreshTokenAuthFlowInput(auth, role); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func refreshTokenAuthFlowInput(auth spec.AuthConfig, role string) (spec.AuthEnvVar, error) {
+	auth.NormalizeEnvVarSpecs("auth")
+	var matches []spec.AuthEnvVar
+	for _, envVar := range auth.EnvVarSpecs {
+		if envVar.EffectiveKind() != spec.AuthEnvVarKindAuthFlowInput {
+			continue
+		}
+		if matchesRefreshTokenAuthFlowRole(envVar.Name, role) {
+			matches = append(matches, envVar)
+		}
+	}
+	if len(matches) != 1 {
+		names := make([]string, 0, len(matches))
+		for _, match := range matches {
+			names = append(names, match.Name)
+		}
+		return spec.AuthEnvVar{}, fmt.Errorf("auth.oauth2_grant refresh_token requires exactly one auth_flow_input env var for %s; found %d (%s)", role, len(matches), strings.Join(names, ", "))
+	}
+	return matches[0], nil
+}
+
+func matchesRefreshTokenAuthFlowRole(name, role string) bool {
+	normalized := strings.ToUpper(strings.TrimSpace(name))
+	switch role {
+	case "client_id":
+		return normalized == "CLIENT_ID" || strings.HasSuffix(normalized, "_CLIENT_ID") || normalized == "LWA_CLIENT_ID" || strings.HasSuffix(normalized, "_LWA_CLIENT_ID")
+	case "client_secret":
+		return normalized == "CLIENT_SECRET" || strings.HasSuffix(normalized, "_CLIENT_SECRET") || normalized == "LWA_CLIENT_SECRET" || strings.HasSuffix(normalized, "_LWA_CLIENT_SECRET")
+	case "refresh_token":
+		return normalized == "REFRESH_TOKEN" || strings.HasSuffix(normalized, "_REFRESH_TOKEN")
+	default:
+		return false
+	}
 }
 
 func effectiveTier(api *spec.APISpec, resource spec.Resource, endpoint spec.Endpoint) string {
@@ -1451,6 +1502,9 @@ func (g *Generator) renderOptionalSupportFiles() error {
 
 func (g *Generator) Generate() error {
 	warnUnenrichedLargeMCPSurface(g.Spec, os.Stderr)
+	if err := validateRefreshTokenAuthFlowInputs(g.Spec.Auth); err != nil {
+		return err
+	}
 	if err := g.prepareOutput(); err != nil {
 		return err
 	}
@@ -1692,14 +1746,17 @@ func (g *Generator) renderAuthFiles() error {
 	}
 	// Render auth command. Template selection priority:
 	//   1. OAuth2 client_credentials (server-to-server, no user redirect)
-	//   2. OAuth2 authorization_code (3-legged, AuthorizationURL non-empty)
-	//   3. Browser-cookie / composed / persisted-query
-	//   4. Simple token-management (catch-all)
+	//   2. OAuth2 refresh_token (pre-authorized private app)
+	//   3. OAuth2 authorization_code (3-legged, AuthorizationURL non-empty)
+	//   4. Browser-cookie / composed / persisted-query
+	//   5. Simple token-management (catch-all)
 	authPath := filepath.Join("internal", "cli", "auth.go")
 	authTmpl := "auth_simple.go.tmpl"
 	switch {
 	case g.Spec.Auth.EffectiveOAuth2Grant() == spec.OAuth2GrantClientCredentials && g.Spec.Auth.TokenURL != "":
 		authTmpl = "auth_client_credentials.go.tmpl"
+	case g.Spec.Auth.EffectiveOAuth2Grant() == spec.OAuth2GrantRefreshToken && g.Spec.Auth.TokenURL != "":
+		authTmpl = "auth_refresh_token.go.tmpl"
 	case g.Spec.Auth.AuthorizationURL != "":
 		authTmpl = "auth.go.tmpl"
 	case g.Spec.Auth.Type == "cookie" || g.Spec.Auth.Type == "composed" || g.hasTrafficAnalysisHint("graphql_persisted_query"):

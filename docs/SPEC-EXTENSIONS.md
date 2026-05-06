@@ -279,6 +279,18 @@ components:
           description: Todoist API key.
 ```
 
+### `oauth2_grant: refresh_token`
+
+Internal YAML specs may set `auth.oauth2_grant: refresh_token` for private-app
+OAuth flows where the user already has a refresh token. The auth block must
+also provide exactly one `auth_flow_input` env var for each setup value:
+client ID, client secret, and refresh token.
+
+Accepted name patterns include `CLIENT_ID`, `LWA_CLIENT_ID`,
+`CLIENT_SECRET`, `LWA_CLIENT_SECRET`, and `REFRESH_TOKEN`, with any API prefix.
+These inputs are used to mint and refresh access tokens; they are not selected
+as request credentials by `CanonicalEnvVar()`.
+
 ### `x-speakeasy-example`
 
 Uses a Speakeasy security-scheme example as the credential environment variable

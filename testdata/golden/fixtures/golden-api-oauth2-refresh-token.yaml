@@ -1,0 +1,39 @@
+name: printing-press-oauth2-refresh-token
+display_name: Printing Press OAuth2 Refresh Token API
+description: Purpose-built fixture for the OAuth2 refresh_token auth shape.
+version: "1.0.0"
+base_url: https://api.refresh.example/v1
+auth:
+  type: oauth2
+  oauth2_grant: refresh_token
+  token_url: https://api.refresh.example/oauth/token
+  header: x-api-access-token
+  format: "{token}"
+  env_var_specs:
+    - name: TEST_API_LWA_CLIENT_ID
+      kind: auth_flow_input
+      required: true
+      sensitive: true
+      description: OAuth client ID for the private app.
+    - name: TEST_API_LWA_CLIENT_SECRET
+      kind: auth_flow_input
+      required: true
+      sensitive: true
+      description: OAuth client secret for the private app.
+    - name: TEST_API_REFRESH_TOKEN
+      kind: auth_flow_input
+      required: true
+      sensitive: true
+      description: Refresh token from self-authorizing the private app.
+  verify_path: /me
+config:
+  format: toml
+  path: ~/.config/printing-press-oauth2-refresh-token-pp-cli/config.toml
+resources:
+  items:
+    description: Manage items.
+    endpoints:
+      list:
+        method: GET
+        path: /items
+        description: List items.

@@ -402,6 +402,14 @@ func TestCanonicalEnvVarSelection(t *testing.T) {
 			auth: AuthConfig{EnvVars: []string{"LEGACY_API_KEY"}},
 			want: "LEGACY_API_KEY",
 		},
+		{
+			name: "falls back to first optional per-call entry",
+			auth: AuthConfig{EnvVarSpecs: []AuthEnvVar{
+				{Name: "CLIENT_ID", Kind: AuthEnvVarKindAuthFlowInput, Required: true, Sensitive: true},
+				{Name: "OPTIONAL_API_KEY", Kind: AuthEnvVarKindPerCall, Sensitive: true},
+			}},
+			want: "OPTIONAL_API_KEY",
+		},
 	}
 
 	for _, tt := range tests {
@@ -411,6 +419,17 @@ func TestCanonicalEnvVarSelection(t *testing.T) {
 			assert.Equal(t, tt.want, got.Name)
 		})
 	}
+}
+
+func TestCanonicalEnvVarIgnoresNonRequestCredentials(t *testing.T) {
+	auth := AuthConfig{EnvVarSpecs: []AuthEnvVar{
+		{Name: "CLIENT_ID", Kind: AuthEnvVarKindAuthFlowInput, Required: true, Sensitive: true},
+		{Name: "CLIENT_SECRET", Kind: AuthEnvVarKindAuthFlowInput, Required: true, Sensitive: true},
+		{Name: "SESSION_COOKIE", Kind: AuthEnvVarKindHarvested, Sensitive: true},
+	}}
+
+	assert.Nil(t, auth.CanonicalEnvVar())
+	assert.False(t, auth.EnvVarSpecs[0].IsRequestCredential())
 }
 
 func TestIsAuthEnvVarORCase(t *testing.T) {
@@ -659,6 +678,7 @@ func TestOAuth2GrantValidate(t *testing.T) {
 		{name: "empty is valid (defaults to authorization_code)", cfg: AuthConfig{}},
 		{name: "explicit authorization_code is valid", cfg: AuthConfig{OAuth2Grant: OAuth2GrantAuthorizationCode}},
 		{name: "client_credentials is valid", cfg: AuthConfig{OAuth2Grant: OAuth2GrantClientCredentials}},
+		{name: "refresh_token is valid", cfg: AuthConfig{OAuth2Grant: OAuth2GrantRefreshToken}},
 		{
 			// Cross-checking against AuthConfig.Type is intentionally skipped
 			// (the field is meaningless for non-oauth2 types but harmless to
@@ -793,6 +813,7 @@ func TestEffectiveOAuth2Grant(t *testing.T) {
 		{name: "whitespace-only also defaults", cfg: AuthConfig{OAuth2Grant: "   "}, want: OAuth2GrantAuthorizationCode},
 		{name: "explicit authorization_code round-trips", cfg: AuthConfig{OAuth2Grant: OAuth2GrantAuthorizationCode}, want: OAuth2GrantAuthorizationCode},
 		{name: "client_credentials round-trips", cfg: AuthConfig{OAuth2Grant: OAuth2GrantClientCredentials}, want: OAuth2GrantClientCredentials},
+		{name: "refresh_token round-trips", cfg: AuthConfig{OAuth2Grant: OAuth2GrantRefreshToken}, want: OAuth2GrantRefreshToken},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

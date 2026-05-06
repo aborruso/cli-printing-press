@@ -78,6 +78,20 @@ export {{.Name}}="<paste-your-key>"
 
 You can also persist this in your config file at `{{$.Config.Path}}`.
 {{- end}}
+{{- else if and (eq .Auth.Type "oauth2") (eq .Auth.EffectiveOAuth2Grant "refresh_token")}}
+
+### 2. Set Up Credentials
+
+Self-authorize your private application in the provider console, export the OAuth client ID, OAuth client secret, and refresh token, then run doctor:
+
+```bash
+export {{refreshTokenAuthFlowInput .Auth "client_id"}}="<client-id>"
+export {{refreshTokenAuthFlowInput .Auth "client_secret"}}="<client-secret>"
+export {{refreshTokenAuthFlowInput .Auth "refresh_token"}}="<refresh-token>"
+{{.Name}}-pp-cli doctor
+```
+
+The CLI exchanges the refresh token for an access token on the first live request and caches the access token locally.
 {{- else if eq .Auth.Type "oauth2"}}
 
 ### 2. Authenticate
@@ -327,6 +341,12 @@ claude mcp add {{.Name}} {{.Name}}-pp-mcp{{range .EndpointTemplateVars}} -e {{en
 
 claude mcp add {{.Name}} {{.Name}}-pp-mcp
 ```
+{{- else if and (eq .Auth.Type "oauth2") (eq .Auth.EffectiveOAuth2Grant "refresh_token")}}
+
+```bash
+# Self-authorize your private application, then provide the OAuth setup env vars:
+claude mcp add {{.Name}} {{.Name}}-pp-mcp -e {{refreshTokenAuthFlowInput .Auth "client_id"}}=<client-id> -e {{refreshTokenAuthFlowInput .Auth "client_secret"}}=<client-secret> -e {{refreshTokenAuthFlowInput .Auth "refresh_token"}}=<refresh-token>
+```
 {{- else if eq .Auth.Type "oauth2"}}
 
 ```bash
@@ -367,6 +387,9 @@ The bundle reuses your local browser session — set it up first if you haven't:
 ```bash
 {{.Name}}-pp-cli auth login --chrome
 ```
+{{- else if and (eq .Auth.Type "oauth2") (eq .Auth.EffectiveOAuth2Grant "refresh_token")}}
+
+The bundle uses OAuth setup environment variables from your MCP host. Self-authorize your private application, provide the OAuth client ID, OAuth client secret, and refresh token, then run doctor.
 {{- else if eq .Auth.Type "oauth2"}}
 
 The bundle reuses your local OAuth tokens — authenticate first if you haven't:
@@ -387,7 +410,9 @@ To install:
 
 1. Download the `.mcpb` for your platform from the [latest release](https://github.com/mvanhorn/printing-press-library/releases/tag/{{.Name}}-current).
 2. Double-click the `.mcpb` file. Claude Desktop opens and walks you through the install.
-{{- if and $canonicalEnvVar (ne .Auth.Type "none") (ne .Auth.Type "cookie") (ne .Auth.Type "composed")}}
+{{- if and (eq .Auth.Type "oauth2") (eq .Auth.EffectiveOAuth2Grant "refresh_token")}}
+3. Fill in `{{refreshTokenAuthFlowInput .Auth "client_id"}}`, `{{refreshTokenAuthFlowInput .Auth "client_secret"}}`, and `{{refreshTokenAuthFlowInput .Auth "refresh_token"}}` when Claude Desktop prompts you.
+{{- else if and $canonicalEnvVar (ne .Auth.Type "none") (ne .Auth.Type "cookie") (ne .Auth.Type "composed")}}
 3. Fill in `{{$canonicalEnvVar.Name}}` when Claude Desktop prompts you.
 {{- end}}
 
@@ -408,7 +433,15 @@ Add to your Claude Desktop config (`~/Library/Application Support/Claude/claude_
 {
   "mcpServers": {
     "{{.Name}}": {
-      "command": "{{.Name}}-pp-mcp"{{- if and $canonicalEnvVar (ne .Auth.Type "none") (ne .Auth.Type "cookie") (ne .Auth.Type "composed")}},
+      "command": "{{.Name}}-pp-mcp"{{- if and (eq .Auth.Type "oauth2") (eq .Auth.EffectiveOAuth2Grant "refresh_token")}},
+      "env": {
+{{- range .EndpointTemplateVars}}
+        "{{envName $.Name}}_{{upper .}}": "{{if eq . "shop"}}<your-store>.myshopify.com{{else if eq . "api_version"}}{{$.Version}}{{else}}<{{.}}>{{end}}",
+{{- end}}
+        "{{refreshTokenAuthFlowInput .Auth "client_id"}}": "<client-id>",
+        "{{refreshTokenAuthFlowInput .Auth "client_secret"}}": "<client-secret>",
+        "{{refreshTokenAuthFlowInput .Auth "refresh_token"}}": "<refresh-token>"
+      }{{- else if and $canonicalEnvVar (ne .Auth.Type "none") (ne .Auth.Type "cookie") (ne .Auth.Type "composed")}},
       "env": {
 {{- range .EndpointTemplateVars}}
         "{{envName $.Name}}_{{upper .}}": "{{if eq . "shop"}}<your-store>.myshopify.com{{else if eq . "api_version"}}{{$.Version}}{{else}}<{{.}}>{{end}}",

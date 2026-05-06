@@ -528,8 +528,10 @@ func (c *AuthConfig) CanonicalEnvVar() *AuthEnvVar {
 			return &c.EnvVarSpecs[i]
 		}
 	}
-	if len(c.EnvVarSpecs) > 0 {
-		return &c.EnvVarSpecs[0]
+	for i := range c.EnvVarSpecs {
+		if c.EnvVarSpecs[i].IsRequestCredential() {
+			return &c.EnvVarSpecs[i]
+		}
 	}
 	return nil
 }
@@ -656,6 +658,10 @@ const OAuth2GrantAuthorizationCode = "authorization_code"
 // TokenURL with form-encoded client_id/client_secret, no user redirect.
 const OAuth2GrantClientCredentials = "client_credentials"
 
+// OAuth2GrantRefreshToken is the private-app refresh-token flow used when a
+// pre-authorized refresh token is exchanged directly at TokenURL.
+const OAuth2GrantRefreshToken = "refresh_token"
+
 // EffectiveOAuth2Grant returns the configured OAuth2 grant type, defaulting
 // to OAuth2GrantAuthorizationCode when unset.
 func (c AuthConfig) EffectiveOAuth2Grant() string {
@@ -671,11 +677,11 @@ func (c AuthConfig) EffectiveOAuth2Grant() string {
 // non-oauth2 types, matching how SessionTTLHours and similar fields behave.
 func validateOAuth2Grant(c AuthConfig) error {
 	switch c.OAuth2Grant {
-	case "", OAuth2GrantAuthorizationCode, OAuth2GrantClientCredentials:
+	case "", OAuth2GrantAuthorizationCode, OAuth2GrantClientCredentials, OAuth2GrantRefreshToken:
 		return nil
 	default:
-		return fmt.Errorf("auth.oauth2_grant %q is not recognized (valid: %q, %q)",
-			c.OAuth2Grant, OAuth2GrantAuthorizationCode, OAuth2GrantClientCredentials)
+		return fmt.Errorf("auth.oauth2_grant %q is not recognized (valid: %q, %q, %q)",
+			c.OAuth2Grant, OAuth2GrantAuthorizationCode, OAuth2GrantClientCredentials, OAuth2GrantRefreshToken)
 	}
 }
 

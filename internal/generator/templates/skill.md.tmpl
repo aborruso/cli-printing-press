@@ -213,6 +213,18 @@ export {{.Name}}="<your-key>"
 
 Or persist it in `{{$.Config.Path}}`.
 {{- end}}
+{{- else if and (eq .Auth.Type "oauth2") (eq .Auth.EffectiveOAuth2Grant "refresh_token")}}
+
+Self-authorize your private application in the provider console, export the OAuth client ID, OAuth client secret, and refresh token, then run doctor:
+
+```bash
+export {{refreshTokenAuthFlowInput .Auth "client_id"}}="<client-id>"
+export {{refreshTokenAuthFlowInput .Auth "client_secret"}}="<client-secret>"
+export {{refreshTokenAuthFlowInput .Auth "refresh_token"}}="<refresh-token>"
+{{.Name}}-pp-cli doctor
+```
+
+The CLI exchanges the refresh token for an access token on first live use and caches the access token locally.
 {{- else if eq .Auth.Type "oauth2"}}
 
 Authenticate via the browser:

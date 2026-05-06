@@ -266,7 +266,6 @@ func (c *Client) do(method, path string, params map[string]string, body any, hea
 			lastErr = apiErr
 			continue
 		}
-
 		// Server error - retry with backoff
 		if resp.StatusCode >= 500 && attempt < maxRetries {
 			wait := time.Duration(math.Pow(2, float64(attempt))) * time.Second
@@ -334,7 +333,7 @@ func (c *Client) authHeader() (string, error) {
 	if c.Config == nil {
 		return "", nil
 	}
-	if c.Config.AccessToken != "" && !c.Config.TokenExpiry.IsZero() && time.Now().After(c.Config.TokenExpiry) && c.Config.RefreshToken != "" {
+	if !c.DryRun && c.Config.AccessToken != "" && !c.Config.TokenExpiry.IsZero() && time.Now().After(c.Config.TokenExpiry) && c.Config.RefreshToken != "" {
 		if err := c.refreshAccessToken(); err != nil {
 			return "", err
 		}

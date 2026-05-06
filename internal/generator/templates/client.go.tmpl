@@ -19,7 +19,7 @@ import (
 	"sort"
 {{- end}}
 	"strings"
-{{- if eq .Auth.EffectiveOAuth2Grant "client_credentials"}}
+{{- if or (eq .Auth.EffectiveOAuth2Grant "client_credentials") (eq .Auth.EffectiveOAuth2Grant "refresh_token")}}
 	"sync"
 {{- end}}
 	"time"
@@ -43,10 +43,10 @@ type Client struct {
 	requestTier string
 	limiters    map[string]*cliutil.AdaptiveLimiter
 {{- end}}
-{{- if eq .Auth.EffectiveOAuth2Grant "client_credentials"}}
-	// ccMu serializes OAuth2 client_credentials token mints so concurrent
-	// API calls inside the 60s pre-expiry window don't all dial the token
-	// endpoint and race on Config field writes / file persistence.
+{{- if or (eq .Auth.EffectiveOAuth2Grant "client_credentials") (eq .Auth.EffectiveOAuth2Grant "refresh_token")}}
+	// ccMu serializes OAuth2 token mints so concurrent API calls inside the
+	// 60s pre-expiry window don't all dial the token endpoint and race on
+	// Config field writes / file persistence.
 	ccMu *sync.Mutex
 {{- end}}
 {{- if eq .Auth.Type "session_handshake"}}
@@ -297,7 +297,7 @@ func New(cfg *config.Config, timeout time.Duration, rateLimit float64) *Client {
 {{- if .HasTierRouting}}
 		limiters:   newTierLimiters(rateLimit),
 {{- end}}
-{{- if eq .Auth.EffectiveOAuth2Grant "client_credentials"}}
+{{- if or (eq .Auth.EffectiveOAuth2Grant "client_credentials") (eq .Auth.EffectiveOAuth2Grant "refresh_token")}}
 		ccMu:       &sync.Mutex{},
 {{- end}}
 		Session:    sess,
@@ -320,7 +320,7 @@ func New(cfg *config.Config, timeout time.Duration, rateLimit float64) *Client {
 {{- if .HasTierRouting}}
 		limiters:   newTierLimiters(rateLimit),
 {{- end}}
-{{- if eq .Auth.EffectiveOAuth2Grant "client_credentials"}}
+{{- if or (eq .Auth.EffectiveOAuth2Grant "client_credentials") (eq .Auth.EffectiveOAuth2Grant "refresh_token")}}
 		ccMu:       &sync.Mutex{},
 {{- end}}
 {{- if .HasCostThrottling}}
@@ -567,6 +567,9 @@ func (c *Client) do(method, path string, params map[string]string, body any, hea
 
 	const maxRetries = 3
 	var lastErr error
+{{- if or (eq .Auth.EffectiveOAuth2Grant "refresh_token") (and (ne .Auth.EffectiveOAuth2Grant "client_credentials") (ne .Auth.TokenURL ""))}}
+	refreshedAfterAuthRejection := false
+{{- end}}
 
 	for attempt := 0; attempt <= maxRetries; attempt++ {
 		// Proactive rate limiting — wait before sending
@@ -723,6 +726,24 @@ func (c *Client) do(method, path string, params map[string]string, body any, hea
 		}
 {{- end}}
 
+{{- if or (eq .Auth.EffectiveOAuth2Grant "refresh_token") (and (ne .Auth.EffectiveOAuth2Grant "client_credentials") (ne .Auth.TokenURL ""))}}
+		if (resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden) && !refreshedAfterAuthRejection && attempt < maxRetries && c.Config != nil && c.Config.RefreshToken != "" {
+			refreshedAfterAuthRejection = true
+			if err := c.refreshAccessToken(); err != nil {
+				return nil, resp.StatusCode, err
+			}
+			authHeader, err = c.authHeader()
+			if err != nil {
+				return nil, 0, err
+			}
+{{- if .HasTierRouting}}
+			authInfo.Value = authHeader
+{{- end}}
+			lastErr = apiErr
+			continue
+		}
+
+{{- end}}
 		// Server error - retry with backoff
 		if resp.StatusCode >= 500 && attempt < maxRetries {
 			wait := time.Duration(math.Pow(2, float64(attempt))) * time.Second
@@ -997,8 +1018,10 @@ func (c *Client) authHeader() (string, error) {
 		return "", nil
 	}
 {{- if eq .Auth.EffectiveOAuth2Grant "client_credentials"}}
-	if c.Config.AccessToken == "" && cliutil.IsVerifyEnv() {
-		c.Config.AccessToken = "mock-token-for-testing"
+	if cliutil.IsVerifyEnv() {
+		if c.Config.AccessToken == "" {
+			c.Config.AccessToken = "mock-token-for-testing"
+		}
 		return c.Config.AuthHeader(), nil
 	}
 	// 60s window avoids in-flight requests racing the expiry boundary.
@@ -1019,8 +1042,32 @@ func (c *Client) authHeader() (string, error) {
 		}
 		c.ccMu.Unlock()
 	}
+{{- else if eq .Auth.EffectiveOAuth2Grant "refresh_token"}}
+	if cliutil.IsVerifyEnv() {
+		if c.Config.AccessToken == "" {
+			c.Config.AccessToken = "mock-token-for-testing"
+		}
+		return c.Config.AuthHeader(), nil
+	}
+	if !c.DryRun && needsRefreshTokenMint(c.Config) {
+		if c.ccMu == nil {
+			c.ccMu = &sync.Mutex{}
+		}
+		c.ccMu.Lock()
+		if needsRefreshTokenMint(c.Config) {
+			if c.Config.ClientID == "" || c.Config.ClientSecret == "" || c.Config.RefreshToken == "" {
+				c.ccMu.Unlock()
+				return "", fmt.Errorf("OAuth refresh_token auth requires client ID, client secret, and refresh token env vars")
+			}
+			if err := c.refreshAccessToken(); err != nil {
+				c.ccMu.Unlock()
+				return "", err
+			}
+		}
+		c.ccMu.Unlock()
+	}
 {{- else}}
-	if c.Config.AccessToken != "" && !c.Config.TokenExpiry.IsZero() && time.Now().After(c.Config.TokenExpiry) && c.Config.RefreshToken != "" {
+	if !c.DryRun && c.Config.AccessToken != "" && !c.Config.TokenExpiry.IsZero() && time.Now().After(c.Config.TokenExpiry) && c.Config.RefreshToken != "" {
 		if err := c.refreshAccessToken(); err != nil {
 			return "", err
 		}
@@ -1100,6 +1147,19 @@ func (c *Client) mintClientCredentials(clientID, clientSecret string) error {
 		return fmt.Errorf("saving minted token: %w", err)
 	}
 	return nil
+}
+{{- end}}
+
+{{- if eq .Auth.EffectiveOAuth2Grant "refresh_token"}}
+
+func needsRefreshTokenMint(cfg *config.Config) bool {
+	if cfg.AccessToken == "" {
+		return true
+	}
+	if cfg.TokenExpiry.IsZero() {
+		return false
+	}
+	return time.Until(cfg.TokenExpiry) < 60*time.Second
 }
 {{- end}}
 

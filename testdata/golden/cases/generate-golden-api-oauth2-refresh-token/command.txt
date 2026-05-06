@@ -1,0 +1,2 @@
+set -euo pipefail
+"$BINARY" generate --spec testdata/golden/fixtures/golden-api-oauth2-refresh-token.yaml --output "$CASE_ACTUAL_DIR/printing-press-oauth2-refresh-token" --force --spec-url file://testdata/golden/fixtures/golden-api-oauth2-refresh-token.yaml --validate=false

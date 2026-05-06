@@ -1516,7 +1516,10 @@ components:
 
 `kind` controls who supplies the value:
 - `per_call` is the default user-supplied credential used by normal commands.
-- `auth_flow_input` is only needed during `auth login`.
+- `auth_flow_input` is setup material used to mint credentials, not a request
+  credential. For authorization-code or client-credentials OAuth this is used
+  during `auth login`; for `oauth2_grant: refresh_token`, these are required
+  environment variables loaded at runtime.
 - `harvested` is populated by the auth login flow into local config.
 
 `sensitive: true` means credential material that must be redacted in logs and
@@ -1531,6 +1534,13 @@ mark each required member `required: true`.
 The parser auto-classifies cookie schemes as `harvested` and OAuth2
 `client_credentials` inputs as `auth_flow_input`. Add `x-auth-vars` only when
 overriding those defaults or resolving multi-scheme ambiguity.
+
+For internal YAML specs that use `auth.oauth2_grant: refresh_token`, declare
+exactly one required `auth_flow_input` each for client ID, client secret, and
+refresh token. Accepted suffixes include `CLIENT_ID`, `LWA_CLIENT_ID`,
+`CLIENT_SECRET`, `LWA_CLIENT_SECRET`, and `REFRESH_TOKEN`; the generator maps
+these into config setup fields and never treats them as bearer/header request
+credentials.
 
 For OpenAPI specs, add an `info.description` mention if one doesn't exist — the
 parser's `inferDescriptionAuth` will detect it automatically.

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"go/parser"
 	"go/token"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -904,6 +905,299 @@ func TestGenerateOAuth2AuthorizationCodeClientRefreshUnchanged(t *testing.T) {
 		"authorization_code spec must NOT emit safety-window helper")
 	assert.NotContains(t, body, "ccMu *sync.Mutex",
 		"authorization_code spec must NOT emit the client_credentials mint mutex")
+}
+
+func TestGenerateOAuth2RefreshTokenGrant(t *testing.T) {
+	tokenListener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	tokenAddr := tokenListener.Addr().String()
+	require.NoError(t, tokenListener.Close())
+
+	apiSpec := &spec.APISpec{
+		Name:    "rtgrant",
+		Version: "0.1.0",
+		BaseURL: "https://api.example.com",
+		Auth: spec.AuthConfig{
+			Type:        "oauth2",
+			Header:      "x-api-access-token",
+			Format:      "{token}",
+			OAuth2Grant: spec.OAuth2GrantRefreshToken,
+			TokenURL:    "http://" + tokenAddr + "/token",
+			EnvVarSpecs: []spec.AuthEnvVar{
+				{Name: "TEST_API_LWA_CLIENT_ID", Kind: spec.AuthEnvVarKindAuthFlowInput, Required: true, Sensitive: true},
+				{Name: "TEST_API_LWA_CLIENT_SECRET", Kind: spec.AuthEnvVarKindAuthFlowInput, Required: true, Sensitive: true},
+				{Name: "TEST_API_REFRESH_TOKEN", Kind: spec.AuthEnvVarKindAuthFlowInput, Required: true, Sensitive: true},
+			},
+		},
+		Config: spec.ConfigSpec{Format: "toml", Path: "~/.config/rtgrant-pp-cli/config.toml"},
+		Resources: map[string]spec.Resource{
+			"items": {
+				Endpoints: map[string]spec.Endpoint{"list": {Method: "GET", Path: "/items"}},
+			},
+		},
+	}
+
+	outputDir := filepath.Join(t.TempDir(), naming.CLI(apiSpec.Name))
+	gen := New(apiSpec, outputDir)
+	require.NoError(t, gen.Generate())
+
+	authBytes, err := os.ReadFile(filepath.Join(outputDir, "internal", "cli", "auth.go"))
+	require.NoError(t, err)
+	authBody := string(authBytes)
+	assert.Contains(t, authBody, "func newAuthStatusCmd")
+	assert.Contains(t, authBody, "Configured, access-token cache empty")
+	assert.NotContains(t, authBody, "newAuthLoginCmd")
+	assert.NotContains(t, authBody, `Use:   "login"`)
+
+	configBytes, err := os.ReadFile(filepath.Join(outputDir, "internal", "config", "config.go"))
+	require.NoError(t, err)
+	configBody := string(configBytes)
+	assert.Contains(t, configBody, `cfg.ClientID = v`)
+	assert.Contains(t, configBody, `os.Getenv("TEST_API_LWA_CLIENT_ID")`)
+	assert.Contains(t, configBody, `cfg.ClientSecret = v`)
+	assert.Contains(t, configBody, `os.Getenv("TEST_API_LWA_CLIENT_SECRET")`)
+	assert.Contains(t, configBody, `cfg.RefreshToken = v`)
+	assert.Contains(t, configBody, `os.Getenv("TEST_API_REFRESH_TOKEN")`)
+
+	clientBytes, err := os.ReadFile(filepath.Join(outputDir, "internal", "client", "client.go"))
+	require.NoError(t, err)
+	clientBody := string(clientBytes)
+	assert.Contains(t, clientBody, "func needsRefreshTokenMint")
+	assert.Contains(t, clientBody, `"grant_type":    {"refresh_token"}`)
+	assert.Contains(t, clientBody, "refreshedAfterAuthRejection := false")
+	assert.Contains(t, clientBody, "resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden")
+	assert.Contains(t, clientBody, "cliutil.IsVerifyEnv()")
+
+	configTest := `package config
+
+import "testing"
+
+func TestRefreshTokenGrantEnvMappingAndAuthHeader(t *testing.T) {
+	t.Setenv("TEST_API_LWA_CLIENT_ID", "client-id")
+	t.Setenv("TEST_API_LWA_CLIENT_SECRET", "client-secret")
+	t.Setenv("TEST_API_REFRESH_TOKEN", "refresh-token")
+
+	cfg, err := Load("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ClientID != "client-id" {
+		t.Fatalf("ClientID = %q", cfg.ClientID)
+	}
+	if cfg.ClientSecret != "client-secret" {
+		t.Fatalf("ClientSecret = %q", cfg.ClientSecret)
+	}
+	if cfg.RefreshToken != "refresh-token" {
+		t.Fatalf("RefreshToken = %q", cfg.RefreshToken)
+	}
+	if got := cfg.AuthHeader(); got != "" {
+		t.Fatalf("AuthHeader() = %q, want empty before access-token mint", got)
+	}
+	cfg.AccessToken = "access-token"
+	if got := cfg.AuthHeader(); got != "access-token" {
+		t.Fatalf("AuthHeader() = %q, want minted access token", got)
+	}
+}
+`
+	require.NoError(t, os.WriteFile(filepath.Join(outputDir, "internal", "config", "refresh_token_test.go"), []byte(configTest), 0o644))
+
+	clientTest := fmt.Sprintf(`package client
+
+import (
+	"encoding/json"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"path/filepath"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"%s/internal/config"
+)
+
+func startRefreshTokenServer(t *testing.T, handler http.HandlerFunc) *httptest.Server {
+	t.Helper()
+	listener, err := net.Listen("tcp", %q)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewUnstartedServer(handler)
+	server.Listener = listener
+	server.Start()
+	t.Cleanup(server.Close)
+	return server
+}
+
+func TestRefreshTokenMintBeforeFirstRequest(t *testing.T) {
+	var tokenCalls int32
+	tokenServer := startRefreshTokenServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/token" {
+			t.Fatalf("token request = %%s %%s", r.Method, r.URL.Path)
+		}
+		if err := r.ParseForm(); err != nil {
+			t.Fatal(err)
+		}
+		want := url.Values{
+			"grant_type": {"refresh_token"},
+			"refresh_token": {"refresh-token"},
+			"client_id": {"client-id"},
+			"client_secret": {"client-secret"},
+		}
+		for key := range want {
+			if r.Form.Get(key) != want.Get(key) {
+				t.Fatalf("form %%s = %%q, want %%q", key, r.Form.Get(key), want.Get(key))
+			}
+		}
+		atomic.AddInt32(&tokenCalls, 1)
+		_ = json.NewEncoder(w).Encode(map[string]any{"access_token": "minted-1", "expires_in": 3600})
+	})
+	_ = tokenServer
+
+	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("x-api-access-token"); got != "minted-1" {
+			t.Fatalf("auth header = %%q, want minted-1", got)
+		}
+		_, _ = w.Write([]byte(`+"`"+`{"ok":true}`+"`"+`))
+	}))
+	defer apiServer.Close()
+
+	cfg := &config.Config{
+		BaseURL:       apiServer.URL,
+		ClientID:      "client-id",
+		ClientSecret:  "client-secret",
+		RefreshToken: "refresh-token",
+		Path:         filepath.Join(t.TempDir(), "config.toml"),
+	}
+	c := New(cfg, 5*time.Second, 100)
+	c.NoCache = true
+	if _, err := c.Get("/items", nil); err != nil {
+		t.Fatal(err)
+	}
+	if tokenCalls != 1 {
+		t.Fatalf("token calls = %%d, want 1", tokenCalls)
+	}
+}
+
+func TestRefreshTokenAuthRejectionRefreshesOnceAndRetries(t *testing.T) {
+	var tokenCalls int32
+	tokenServer := startRefreshTokenServer(t, func(w http.ResponseWriter, r *http.Request) {
+		call := atomic.AddInt32(&tokenCalls, 1)
+		token := "minted-1"
+		if call == 2 {
+			token = "minted-2"
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"access_token": token, "expires_in": 3600})
+	})
+	_ = tokenServer
+
+	var apiCalls int32
+	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		call := atomic.AddInt32(&apiCalls, 1)
+		switch {
+		case call == 1 && r.Header.Get("x-api-access-token") == "minted-1":
+			http.Error(w, "expired", http.StatusUnauthorized)
+		case call == 2 && r.Header.Get("x-api-access-token") == "minted-2":
+			_, _ = w.Write([]byte(`+"`"+`{"ok":true}`+"`"+`))
+		default:
+			t.Fatalf("unexpected call %%d with auth %%q", call, r.Header.Get("x-api-access-token"))
+		}
+	}))
+	defer apiServer.Close()
+
+	cfg := &config.Config{
+		BaseURL:       apiServer.URL,
+		ClientID:      "client-id",
+		ClientSecret:  "client-secret",
+		RefreshToken: "refresh-token",
+		Path:         filepath.Join(t.TempDir(), "config.toml"),
+	}
+	c := New(cfg, 5*time.Second, 100)
+	c.NoCache = true
+	if _, err := c.Get("/items", nil); err != nil {
+		t.Fatal(err)
+	}
+	if tokenCalls != 2 {
+		t.Fatalf("token calls = %%d, want 2", tokenCalls)
+	}
+	if apiCalls != 2 {
+		t.Fatalf("api calls = %%d, want 2", apiCalls)
+	}
+}
+
+func TestRefreshTokenVerifyEnvDoesNotMintWithExpiredCache(t *testing.T) {
+	t.Setenv("PRINTING_PRESS_VERIFY", "1")
+
+	var tokenCalls int32
+	tokenServer := startRefreshTokenServer(t, func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&tokenCalls, 1)
+		t.Fatal("verify env must not call token endpoint")
+	})
+	_ = tokenServer
+
+	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("x-api-access-token"); got != "expired-cache-token" {
+			t.Fatalf("auth header = %%q, want expired-cache-token", got)
+		}
+		_, _ = w.Write([]byte(`+"`"+`{"ok":true}`+"`"+`))
+	}))
+	defer apiServer.Close()
+
+	cfg := &config.Config{
+		BaseURL:       apiServer.URL,
+		ClientID:      "client-id",
+		ClientSecret:  "client-secret",
+		AccessToken:   "expired-cache-token",
+		RefreshToken: "refresh-token",
+		TokenExpiry:   time.Now().Add(-time.Hour),
+		Path:         filepath.Join(t.TempDir(), "config.toml"),
+	}
+	c := New(cfg, 5*time.Second, 100)
+	c.NoCache = true
+	if _, err := c.Get("/items", nil); err != nil {
+		t.Fatal(err)
+	}
+	if tokenCalls != 0 {
+		t.Fatalf("token calls = %%d, want 0", tokenCalls)
+	}
+}
+`, naming.CLI(apiSpec.Name), tokenAddr)
+	require.NoError(t, os.WriteFile(filepath.Join(outputDir, "internal", "client", "refresh_token_test.go"), []byte(clientTest), 0o644))
+
+	runGoCommand(t, outputDir, "mod", "tidy")
+	runGoCommand(t, outputDir, "test", "./internal/config", "./internal/client")
+	runGoCommand(t, outputDir, "build", "./...")
+}
+
+func TestGenerateAmazonSPAPIWrapperSpec(t *testing.T) {
+	t.Parallel()
+
+	apiSpec, err := spec.Parse(filepath.Join("..", "..", "catalog", "specs", "amazon-sp-api.yaml"))
+	require.NoError(t, err)
+	require.Equal(t, spec.OAuth2GrantRefreshToken, apiSpec.Auth.EffectiveOAuth2Grant())
+
+	outputDir := filepath.Join(t.TempDir(), naming.CLI(apiSpec.Name))
+	gen := New(apiSpec, outputDir)
+	require.NoError(t, gen.Generate())
+
+	authGo, err := os.ReadFile(filepath.Join(outputDir, "internal", "cli", "auth.go"))
+	require.NoError(t, err)
+	assert.NotContains(t, string(authGo), `Use:   "login"`)
+	assert.Contains(t, string(authGo), "Configured, access-token cache empty")
+
+	reportsCreateGo, err := os.ReadFile(filepath.Join(outputDir, "internal", "cli", "reports_create.go"))
+	require.NoError(t, err)
+	assert.Contains(t, string(reportsCreateGo), `cmd.Flags().BoolVar(&stdinBody, "stdin"`)
+	assert.NotContains(t, string(reportsCreateGo), `"mcp:read-only": "true"`,
+		"reports create mutates remote state by requesting report generation")
+
+	sellersGo, err := os.ReadFile(filepath.Join(outputDir, "internal", "cli", "promoted_sellers.go"))
+	require.NoError(t, err)
+	assert.Contains(t, string(sellersGo), `"mcp:read-only": "true"`)
+
+	runGoCommand(t, outputDir, "mod", "tidy")
+	runGoCommand(t, outputDir, "build", "./...")
 }
 
 func TestGenerateAPIKeyAuthFormatSupportsTokenPlaceholder(t *testing.T) {
