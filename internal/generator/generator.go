@@ -223,6 +223,8 @@ func New(s *spec.APISpec, outputDir string) *Generator {
 		"composeMCPDesc":         composeMCPDesc,
 		"composeMCPSubDesc":      composeMCPSubDesc,
 		"mcpParamDesc":           g.mcpParamDescription,
+		"endpointMetaTrue":       endpointMetaTrue,
+		"commandAnnotations":     commandAnnotationsLiteral,
 		"flagName":               flagName,
 		"paramIdent":             paramIdent,
 		"safeTypeName":           safeTypeName,
@@ -261,6 +263,7 @@ func New(s *spec.APISpec, outputDir string) *Generator {
 		},
 		"effectiveEndpointPath":    effectiveEndpointPath,
 		"effectiveSubEndpointPath": effectiveSubEndpointPath,
+		"endpointIsReadCommand":    endpointIsReadCommand,
 		"enumLiteral": func(values []string) string {
 			// Render a string slice as a Go []string literal for template embedding.
 			// Example: ["asc","desc"] → `"asc", "desc"`. Returns empty string when
@@ -1451,6 +1454,7 @@ func (g *Generator) renderOptionalSupportFiles() error {
 
 func (g *Generator) Generate() error {
 	warnUnenrichedLargeMCPSurface(g.Spec, os.Stderr)
+	warnUnannotatedMutations(g.Spec, os.Stderr)
 	if err := g.prepareOutput(); err != nil {
 		return err
 	}

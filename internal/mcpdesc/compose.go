@@ -41,6 +41,8 @@ const (
 	methodPATCH  = "PATCH"
 	methodPUT    = "PUT"
 	methodDELETE = "DELETE"
+
+	privacySensitiveMetaKey = "mcp:privacy-sensitive"
 )
 
 type Input struct {
@@ -92,6 +94,7 @@ func Compose(in Input) string {
 	}
 
 	composed = appendMethodMarker(composed, in.Endpoint.Method)
+	composed = prependPrivacyMarker(composed, endpointMetaTrue(in.Endpoint, privacySensitiveMetaKey))
 	return naming.MCPDescription(composed, in.NoAuth, in.AuthType, in.PublicCount, in.TotalCount)
 }
 
@@ -241,6 +244,24 @@ func appendMethodMarker(desc, method string) string {
 		}
 	}
 	return desc
+}
+
+func prependPrivacyMarker(desc string, privacySensitive bool) string {
+	if desc == "" || !privacySensitive {
+		return desc
+	}
+	lower := strings.ToLower(desc)
+	if strings.Contains(lower, "privacy-sensitive") || strings.Contains(lower, "privacy sensitive") {
+		return desc
+	}
+	return "Privacy-sensitive: may expose personal, financial, or message content. " + desc
+}
+
+func endpointMetaTrue(ep spec.Endpoint, key string) bool {
+	if ep.Meta == nil {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(ep.Meta[key]), "true")
 }
 
 func formatParam(p spec.Param) string {

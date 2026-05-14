@@ -255,6 +255,22 @@ func TestCompose_NoParamsNoResponse(t *testing.T) {
 	assert.Equal(t, "Health check.", got)
 }
 
+func TestCompose_PrivacySensitivePrefixAddedOnce(t *testing.T) {
+	in := Input{
+		Endpoint: spec.Endpoint{
+			Method:      "GET",
+			Path:        "/messages/{id}",
+			Description: "Retrieve a message body",
+			Meta:        map[string]string{"mcp:privacy-sensitive": "true"},
+			Params:      []spec.Param{{Name: "id", Required: true, Positional: true}},
+		},
+		AuthType: "bearer_token",
+	}
+	got := Compose(in)
+	assert.Contains(t, got, "Privacy-sensitive: may expose personal, financial, or message content.")
+	assert.Equal(t, 1, strings.Count(strings.ToLower(got), "privacy-sensitive"))
+}
+
 func TestCompose_AppendsAuthAnnotationViaMCPDescription(t *testing.T) {
 	// Compose delegates the (public)/(requires auth) suffix to
 	// naming.MCPDescription so the auth-annotation logic stays
