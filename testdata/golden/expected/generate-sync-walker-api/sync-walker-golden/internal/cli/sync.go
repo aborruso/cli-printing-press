@@ -1419,8 +1419,8 @@ var genericIDFieldFallbacks = []string{"id", "ID", "gid", "sid", "uid", "uuid", 
 // {"Items": [...]} envelopes fall through to the ambiguity scan and a
 // single-array sibling miscount silently truncates sync.
 var pageItemKeys = []string{
-	"data", "results", "items", "records", "nodes", "entries",
-	"Data", "Results", "Items", "Records", "Nodes", "Entries",
+	"data", "results", "items", "records", "nodes", "entries", "features",
+	"Data", "Results", "Items", "Records", "Nodes", "Entries", "Features",
 }
 
 // criticalResources is the template-time projection of per-resource Critical
