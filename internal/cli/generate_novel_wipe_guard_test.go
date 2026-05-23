@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -117,7 +118,7 @@ func TestDetectNovelHandAuthored_CapsHandAuthoredFileList(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	require.NoError(t, os.MkdirAll(filepath.Join(dir, "internal/cli"), 0o755))
-	for i := 0; i < handAuthoredFileSampleCap+5; i++ {
+	for i := range handAuthoredFileSampleCap + 5 {
 		path := filepath.Join(dir, "internal/cli", "novel_"+itoa(i)+".go")
 		require.NoError(t, os.WriteFile(path, []byte("package cli\n"), 0o644))
 	}
@@ -128,24 +129,8 @@ func TestDetectNovelHandAuthored_CapsHandAuthoredFileList(t *testing.T) {
 	assert.True(t, signal.HandAuthoredFilesTruncated)
 }
 
-// itoa is a tiny helper to avoid importing strconv just for the cap test.
-func itoa(i int) string {
-	if i == 0 {
-		return "0"
-	}
-	var buf [4]byte
-	n := 0
-	for i > 0 {
-		buf[n] = byte('0' + i%10)
-		i /= 10
-		n++
-	}
-	out := make([]byte, n)
-	for j := 0; j < n; j++ {
-		out[j] = buf[n-1-j]
-	}
-	return string(out)
-}
+// itoa returns the decimal string for non-negative i.
+func itoa(i int) string { return strconv.Itoa(i) }
 
 func TestGenerateCmdForceRefusesNovelWipeWithoutFlag(t *testing.T) {
 	t.Parallel()
