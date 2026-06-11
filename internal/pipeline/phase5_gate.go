@@ -14,6 +14,11 @@ const (
 
 	phase5AcceptanceLevelQuick = "quick"
 	phase5AcceptanceLevelFull  = "full"
+
+	phase5SkipReasonAuthRequiredNoCredential       = "auth_required_no_credential"
+	phase5SkipReasonExternalCredentialsUnavailable = "external_credentials_unavailable"
+	phase5SkipReasonLANUnreachableFromHost         = "lan-unreachable-from-generation-host"
+	phase5SkipReasonLocalSourceRequiresDatabase    = "local_source_requires_operator_database"
 )
 
 var phase5AcceptedAcceptanceLevels = []string{
@@ -25,6 +30,8 @@ type Phase5AuthContext struct {
 	Type                    string `json:"type,omitempty"`
 	APIKeyAvailable         bool   `json:"api_key_available,omitempty"`
 	BrowserSessionAvailable bool   `json:"browser_session_available,omitempty"`
+	LocalSQLite             bool   `json:"local_sqlite,omitempty"`
+	LocalNetworkOnly        bool   `json:"local_network_only,omitempty"`
 }
 
 type Phase5GateMarker struct {
@@ -219,8 +226,12 @@ func phase5AcceptancePassed(marker Phase5GateMarker) (bool, string) {
 		if marker.TestsFailed != 0 {
 			return false, fmt.Sprintf("phase5 full acceptance has %d failed tests", marker.TestsFailed)
 		}
-		if marker.TestsPassed != marker.MatrixSize {
-			return false, fmt.Sprintf("phase5 full acceptance requires all %d tests passed, got %d", marker.MatrixSize, marker.TestsPassed)
+		if marker.TestsPassed == marker.MatrixSize {
+			return true, ""
+		}
+		accountedTests := marker.TestsPassed + marker.TestsSkipped
+		if accountedTests != marker.MatrixSize {
+			return false, fmt.Sprintf("phase5 full acceptance requires all %d tests accounted for (passed+skipped), got %d passed + %d skipped = %d", marker.MatrixSize, marker.TestsPassed, marker.TestsSkipped, accountedTests)
 		}
 		return true, ""
 	default:
@@ -248,18 +259,40 @@ func validatePhase5SkipMarker(marker Phase5GateMarker) string {
 func phase5SkipAllowed(marker Phase5GateMarker, manifest CLIManifest) (bool, string) {
 	authType := strings.ToLower(strings.TrimSpace(manifest.AuthType))
 	markerAuthType := strings.ToLower(strings.TrimSpace(marker.AuthContext.Type))
+	skipReason := phase5SkipReason(marker)
 	if authType == "" {
 		authType = markerAuthType
-	} else if markerAuthType != "" && markerAuthType != authType {
+	} else if markerAuthType != "" && markerAuthType != authType && (authType != "none" || !phase5SyntheticExternalCredentialSkip(manifest, skipReason)) {
 		return false, fmt.Sprintf("phase5 skip marker auth type %q does not match manifest auth type %q", marker.AuthContext.Type, manifest.AuthType)
 	}
 	if authType == "" || authType == "none" {
+		if manifest.IsLocalDatastore() {
+			if skipReason == phase5SkipReasonLocalSourceRequiresDatabase {
+				return true, ""
+			}
+			return false, fmt.Sprintf("phase5 skip reason %q is not valid for local datastore no-auth APIs", marker.SkipReason)
+		}
+		if skipReason == phase5SkipReasonLANUnreachableFromHost {
+			if !marker.AuthContext.LocalNetworkOnly {
+				return false, "phase5 LAN-unreachable skip requires auth_context.local_network_only=true"
+			}
+			return true, ""
+		}
+		if phase5SyntheticExternalCredentialSkip(manifest, skipReason) {
+			if marker.AuthContext.APIKeyAvailable {
+				return false, "phase5 skip claims an API key was available"
+			}
+			return true, ""
+		}
 		return false, "no-auth APIs require a phase5 pass marker, not a skip marker"
 	}
 	if marker.AuthContext.APIKeyAvailable {
 		return false, "phase5 skip claims an API key was available"
 	}
 	if authRequiresCredential(authType) {
+		if phase5SkipReason(marker) == phase5SkipReasonLANUnreachableFromHost {
+			return false, fmt.Sprintf("phase5 skip reason %q is not valid for auth type %q", marker.SkipReason, authType)
+		}
 		return true, ""
 	}
 	switch authType {
@@ -268,4 +301,12 @@ func phase5SkipAllowed(marker Phase5GateMarker, manifest CLIManifest) (bool, str
 	default:
 		return false, fmt.Sprintf("phase5 skip not allowed for auth type %q", authType)
 	}
+}
+
+func phase5SkipReason(marker Phase5GateMarker) string {
+	return strings.ToLower(strings.TrimSpace(marker.SkipReason))
+}
+
+func phase5SyntheticExternalCredentialSkip(manifest CLIManifest, skipReason string) bool {
+	return manifest.IsSyntheticSpec() && skipReason == phase5SkipReasonExternalCredentialsUnavailable
 }

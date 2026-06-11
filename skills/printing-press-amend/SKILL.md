@@ -36,12 +36,12 @@ Turn a dogfood session into a PR for a printed CLI in the public library.
 /printing-press-amend                 # auto-detect target CLI from session
 /printing-press-amend superhuman      # explicit short name
 /printing-press-amend superhuman-pp-cli
-/printing-press-amend ~/printing-press/library/superhuman
+/printing-press-amend "$PRESS_LIBRARY/superhuman"
 ```
 
 This skill lives in this repo (the machine) and acts on a printed CLI in the public library. It is sibling to `/printing-press-publish` (adds a new CLI), `/printing-press-polish` (improves a CLI pre-publish), and `/printing-press-retro` (reflects on the machine itself). None of those cover post-publish CLI amendments driven by real-session friction.
 
-The artifact this skill produces is semantically a "patch" (in the git/PR sense), tracked by the public library's `// PATCH(...)` source-comment convention and `.printing-press-patches.json` manifest. The slash-skill name is `amend` to disambiguate from the existing `cli-printing-press patch` binary subcommand (which AST-injects pre-defined features — different mechanism, different intent).
+The artifact this skill produces is semantically a "patch" (in the git/PR sense), tracked by the public library's `.printing-press-patches/` directory (one file per patch). Inline `// PATCH(...)` source comments are optional navigation aids when they make a customized site easier to grep. The slash-skill name is `amend` to disambiguate from the existing `cli-printing-press patch` binary subcommand (which AST-injects pre-defined features — different mechanism, different intent).
 
 ## Setup
 
@@ -91,19 +91,60 @@ if [ -z "$PRESS_BASE" ]; then
 fi
 
 PRESS_SCOPE="$PRESS_BASE-$(printf '%s' "$_scope_dir" | shasum -a 256 | cut -c1-8)"
-PRESS_HOME="$HOME/printing-press"
+PRESS_HOME="${PRINTING_PRESS_HOME:-$HOME/printing-press}"
 PRESS_RUNSTATE="$PRESS_HOME/.runstate/$PRESS_SCOPE"
 PRESS_LIBRARY="$PRESS_HOME/library"
 PRESS_MANUSCRIPTS="$PRESS_HOME/manuscripts"
 PRESS_CURRENT="$PRESS_RUNSTATE/current"
 
 mkdir -p "$PRESS_RUNSTATE" "$PRESS_LIBRARY" "$PRESS_MANUSCRIPTS" "$PRESS_CURRENT"
+
+# --- Currency-floor check (standalone, fail-open) ---
+# Hard-stop on binaries below the published supported floor so amend does not
+# regenerate CLIs with since-fixed bugs. Repo checkouts build from source and
+# are exempt. The floor is clamped to <= latest so a bad value cannot brick
+# every install. Fetched fresh each run rather than reusing the printing-press
+# preflight's TTL cache: amend is low-frequency, so the bounded curl + go-list
+# cost is not worth its own cache here.
+if [ "$_press_repo" != "true" ] && command -v curl >/dev/null 2>&1; then
+  _semver_lt() {
+    awk -v a="$1" -v b="$2" 'BEGIN {
+      split(a, x, "."); split(b, y, ".")
+      for (i = 1; i <= 3; i++) {
+        if ((x[i] + 0) < (y[i] + 0)) exit 0
+        if ((x[i] + 0) > (y[i] + 0)) exit 1
+      }
+      exit 1
+    }'
+  }
+  _floor_installed=$("$PRINTING_PRESS_BIN" version --json 2>/dev/null | sed -nE 's/.*"version"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/p')
+  _floor_doc=$(curl -fsSL --max-time 5 \
+    https://raw.githubusercontent.com/mvanhorn/cli-printing-press/main/supported-versions.txt 2>/dev/null || true)
+  _floor_min=$(printf '%s\n' "$_floor_doc" | awk -F= '/^min_supported=/{print $2; exit}')
+  _floor_reason=$(printf '%s\n' "$_floor_doc" | sed -nE 's/^reason=//p' | head -n 1)
+  _floor_latest=""
+  if command -v go >/dev/null 2>&1; then
+    _floor_latest=$(go list -m -json github.com/mvanhorn/cli-printing-press/v4@latest 2>/dev/null | awk '/"Version":/{v=$2; gsub(/[",]/,"",v); sub(/^v/,"",v); print v; exit}')
+  fi
+  if [ -n "$_floor_min" ] && [ -n "$_floor_installed" ] && [ -n "$_floor_latest" ] &&
+     _semver_lt "$_floor_installed" "$_floor_min" &&
+     ! _semver_lt "$_floor_latest" "$_floor_min"; then
+    echo ""
+    echo "[upgrade-required] printing-press v$_floor_min is the minimum supported version (you have v$_floor_installed)"
+    echo "PRESS_REQUIRED_MIN=$_floor_min"
+    echo "PRESS_REQUIRED_INSTALLED=$_floor_installed"
+    echo "PRESS_REQUIRED_REASON=$_floor_reason"
+    echo ""
+  fi
+fi
 ```
 <!-- PRESS_SETUP_CONTRACT_END -->
 
 After running the setup contract, capture the `PRINTING_PRESS_BIN=<abs-path>` line from stdout. **Every subsequent `cli-printing-press ...` invocation in this skill must use that absolute path** (substitute the value, not the literal `$PRINTING_PRESS_BIN` token) — `export PATH` above only affects the single Bash tool call it runs in, so later calls open a fresh shell where bare `cli-printing-press` resolves against the user's default `PATH` and a stale global can shadow the local build.
 
 After capturing the binary path, check binary version compatibility. Read the `min-binary-version` field from this skill's YAML frontmatter. Run `<PRINTING_PRESS_BIN> version --json` and parse the version from the output. Compare it to `min-binary-version` using semver rules. If the installed binary is older than the minimum, stop immediately and tell the user: "cli-printing-press binary vX.Y.Z is older than the minimum required vA.B.C. Run `go install github.com/mvanhorn/cli-printing-press/v4/cmd/cli-printing-press@latest` to update."
+
+If the setup contract emitted an `[upgrade-required]` block, the installed binary is below the published **currency floor** (`PRESS_REQUIRED_MIN`) — older releases regenerate CLIs with since-fixed bugs (`PRESS_REQUIRED_REASON`). This is a hard gate distinct from `min-binary-version`: do not amend or regenerate on that binary. Offer a one-click upgrade via `AskUserQuestion` — **Yes — upgrade now** (run `go install github.com/mvanhorn/cli-printing-press/v4/cmd/cli-printing-press@latest`, re-capture `PRINTING_PRESS_BIN`, then continue) or **Cancel** (stop the run). There is no skip-and-continue; below the floor the only paths are upgrade or abort. If the upgrade command fails, surface it and stop.
 
 ## Phase 0 — Input Mode Detection
 
@@ -493,7 +534,7 @@ For each finding in dependency order:
 
 1. Edit the target files under `$CLI_DIR/`. Honor AGENTS.md anti-reimplementation rules (no hand-rolled response builders; novel commands must call the real endpoint or read from the local store via `// pp:client-call` / `// pp:novel-static-reference` opt-outs only when truly justified).
 
-2. Add a `// PATCH(<short reason>)` source comment at every changed site. Format examples:
+2. Optional: add a `// PATCH(<short reason>)` source comment at changed sites when it helps future agents find the customization quickly. Format examples:
 
    ```go
    // PATCH(amend-2026-05-15: surface refresh-token expiry to user) — was silently retrying
@@ -502,22 +543,32 @@ For each finding in dependency order:
    }
    ```
 
-3. Update `$CLI_DIR/.printing-press-patches.json`. Append an entry under `patches[]`:
+3. Create one patch file `$CLI_DIR/.printing-press-patches/<id>.json` (filename = the patch `id`). Each file is a single self-contained patch object — one file per patch, so concurrent amend PRs on the same CLI never conflict on patch metadata:
 
    ```json
    {
-     "date": "2026-05-15",
-     "amend_run_id": "amend-2026-05-15T1432",
+     "schema_version": 2,
+     "id": "<api-slug>-refresh-token-expiry",
+     "applied_at": "<YYYY-MM-DD>",
+     "base_run_id": "<copy from .printing-press.json>",
+     "base_printing_press_version": "<copy from .printing-press.json>",
      "summary": "fix(superhuman): surface refresh-token expiry; add drafts new + --type sent",
+     "reason": "The generated CLI hid an expired refresh token and omitted a workflow flag needed by the live API.",
      "files": [
        "internal/auth/refresh.go",
        "internal/cli/drafts.go",
        "internal/cli/threads.go"
      ],
-     "findings_addressed": ["F1", "F2", "F5", "F7"],
-     "patch_count": <total // PATCH comments added in this run>
+     "validated_outcome": "publish validate passed; focused drafts and refresh-token checks pass",
+     "findings_addressed": ["F1", "F2", "F5", "F7"]
    }
    ```
+
+   If the CLI still ships the legacy single-array `.printing-press-patches.json` (older print, not yet normalized), still write your entry as a new `.printing-press-patches/<id>.json` file — the public library's normalize-patches workflow merges the two post-merge. Do not append to the legacy array.
+
+   If you add `// PATCH(...)` comments, you may also include a `patch_count`
+   field for reviewer convenience. Do not add `patch_count` when no source
+   comments were added.
 
    For a temporary patch with a future supersession path, include the upstream handoff fields in that same patch entry:
 
@@ -533,7 +584,7 @@ For each finding in dependency order:
    }
    ```
 
-   Both halves of the contract — `// PATCH(...)` source comments AND `.printing-press-patches.json` entries — are MANDATORY. The library's `verify-library-conventions` workflow rejects PRs where one is present without the other. See `~/printing-press-library/AGENTS.md` "How to record a hand-edit" for the authoritative spec.
+   The `.printing-press-patches/<id>.json` patch file is mandatory for code-level customizations. Inline `// PATCH(...)` source comments are optional navigation aids; the public library verifier no longer enforces a marker/comment pairing. See `~/printing-press-library/AGENTS.md` for the authoritative spec.
 
    Use `deferred_to_upstream` only when the patch intentionally leaves a future supersession path: a public API endpoint is missing today, the command relies on an unofficial host or alternate auth source, a live response shape drifted from generator assumptions, or the fix would become unnecessary once the Printing Press learns the pattern. In those cases, search `mvanhorn/cli-printing-press` issues first; reuse a matching issue or open one before the library PR, then set `upstream_issue` to that URL. Do not leave a machine-level or API-publication dependency only in the PR body.
 
@@ -541,7 +592,7 @@ For each finding in dependency order:
 
    > "Finding F5 (`--type sent` missing) looks like a machine-level fix — the generator template `internal/generator/templates/threads.go.tmpl` should emit it for every CLI with this endpoint shape, not just `<slug>-pp-cli`. Defer to a `/printing-press-retro` follow-up, or proceed CLI-specific?"
 
-   When deferred, drop into the deferred-list with classification `machine-level`. When kept because the printed CLI needs a narrow fix now, and the patch still carries a future supersession path, create or reuse the upstream Printing Press issue before opening the library PR, add the issue URL to `.printing-press-patches.json`, and add a `deferred_to_upstream` item naming the machine-level or upstream-API condition that should supersede the local patch.
+   When deferred, drop into the deferred-list with classification `machine-level`. When kept because the printed CLI needs a narrow fix now, and the patch still carries a future supersession path, create or reuse the upstream Printing Press issue before opening the library PR, add the issue URL to the patch's `.printing-press-patches/<id>.json`, and add a `deferred_to_upstream` item naming the machine-level or upstream-API condition that should supersede the local patch.
 
 ### Step 4 — Validate
 
@@ -567,35 +618,28 @@ cp "$PLAN_PATH" "$HELD_PATH"
 
 Surface the final error log to the user, do NOT auto-open the PR, exit. The user can resume by re-invoking the skill (Phase 1 detects the held plan and offers to resume).
 
-### Step 6 — Caveat: validate doesn't enforce the patch contract
+### Step 6 — Check the patch manifest
 
-`publish validate` does NOT check `.printing-press-patches.json` ↔ `// PATCH(...)` parity. That contract is enforced by the public library's `verify-library-conventions` workflow only after the PR opens. To catch it locally, run a quick parity check before proceeding to Phase 5:
+This amend run must have recorded at least one patch — a `<id>.json` under
+`.printing-press-patches/` (the directory layout), or, only for a CLI not yet
+normalized, a non-empty `patches[]` in the legacy `.printing-press-patches.json`.
 
 ```bash
-# Count only NEW // PATCH(...) markers added in this run by diffing against
-# upstream. A naive `grep -rc` over $CLI_DIR also counts markers added by
-# prior amend runs, which lets a zero-new-markers run pass when prior history
-# makes the cumulative count meet or exceed the per-run declared count.
-#
-# This check runs in Phase 4 Step 6 — BEFORE the Phase 7 commit. The edits
-# are still in the working tree, not in any commit, so `git diff` against
-# upstream/main (working-tree diff) is the right tool. `format-patch
-# upstream/main..HEAD` would scan committed history only, find no commits,
-# and emit nothing — silently returning 0 markers for every valid run.
-#
-# --no-pager + --no-color + --no-ext-diff defeats colorized output and any
-# configured `diff.external` tool that would reformat the diff away from
-# unified-diff shape and break the grep parse.
-new_patch_markers=$(git -C "$PUBLISH_REPO_DIR" --no-pager diff --no-color --no-ext-diff upstream/main -- "$CLI_DIR" \
-  | grep -cE '^\+.*// PATCH\(')
-patches_entry=$(jq '.patches[-1].patch_count // 0' "$CLI_DIR/.printing-press-patches.json")
-if [ "$new_patch_markers" -lt "$patches_entry" ]; then
-  echo "ERROR: .printing-press-patches.json claims $patches_entry patch markers added this run, found $new_patch_markers new // PATCH(...) comments in the diff."
+dir_count=0
+if [ -d "$CLI_DIR/.printing-press-patches" ]; then
+  dir_count=$(find "$CLI_DIR/.printing-press-patches" -maxdepth 1 -name '*.json' ! -name '_meta.json' | wc -l | tr -d ' ')
+fi
+legacy_count=0
+if [ -f "$CLI_DIR/.printing-press-patches.json" ]; then
+  legacy_count=$(jq '(.patches // []) | length' "$CLI_DIR/.printing-press-patches.json")
+fi
+if [ "$dir_count" -eq 0 ] && [ "$legacy_count" -eq 0 ]; then
+  echo "ERROR: this amend run must record at least one patch under .printing-press-patches/ (or the legacy .printing-press-patches.json)."
   exit 1
 fi
 ```
 
-Mismatched contract → fix locally before continuing. (A follow-up retro item: lift this check into `cli-printing-press publish validate` so future amend runs catch it natively.)
+Missing or empty patch manifest → fix locally before continuing.
 
 ### Output
 
@@ -610,7 +654,7 @@ build_status: PASS|FAIL
 test_status: PASS|FAIL
 dogfood_status: PASS|FAIL|N/A    # PASS|FAIL when MODE=dogfood (or "both"); always N/A when MODE=direct
 validate_iterations: <n>
-patch_marker_count: <n>
+patch_entry_count: <n>
 ```
 
 **`dogfood_status` per mode.** When `MODE=dogfood`, the value reflects the result of the dogfood validation step that consumed the transcript-derived findings (PASS if the run produced a clean fix, FAIL if it surfaced a regression). When `MODE=direct`, there is no transcript to dogfood against — set `dogfood_status=N/A`. When `MODE=both`, dogfood validation still runs against the transcript half of the findings; set PASS/FAIL accordingly. This default must be set at the latest by the end of Phase 4 so Phase 7's PR body and Phase 8's RESULT block never emit an empty value.
@@ -653,7 +697,7 @@ PR body sections (per origin R27):
 2. **Findings** — table with ID, category, type (bug/feature), rationale
 3. **Changes** — output of `git diff --stat upstream/main..HEAD`
 4. **Verification** — build/test/dogfood/validate status from Phase 4
-5. **Evidence** — full GitHub URLs to the per-run plan doc and `.printing-press-patches.json` at the PR's HEAD SHA (captured AFTER push so links don't 404)
+5. **Evidence** — full GitHub URLs to the per-run plan doc and the `.printing-press-patches/` directory at the PR's HEAD SHA (captured AFTER push so links don't 404)
 6. **Closes #N** footer when an issue match was found in Step 6 of `library-pr-plumbing.md`
 
 Labels: `comp:<api-slug>` always; `priority:P1` for bugs-only scope, `priority:P2` for bugs+features, `priority:P3` for all-tiers.

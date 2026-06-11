@@ -231,7 +231,7 @@ func PromoteWorkingCLI(cliName, workingDir string, state *PipelineState) error {
 	if err := validatePhase5GateForPromote(workingDir, state); err != nil {
 		return err
 	}
-	if err := validatePIIGateForPromote(workingDir); err != nil {
+	if err := validatePIIGateForPromote(workingDir, state); err != nil {
 		return err
 	}
 
@@ -280,6 +280,10 @@ func PromoteWorkingCLI(cliName, workingDir string, state *PipelineState) error {
 	if err := writeCLIManifestForPublish(state, stagingDir); err != nil {
 		_ = os.RemoveAll(stagingDir)
 		return fmt.Errorf("writing CLI manifest: %w", err)
+	}
+	if err := restorePermanentCreatorForPromote(stagingDir, libraryDir, state.APIName); err != nil {
+		_ = os.RemoveAll(stagingDir)
+		return fmt.Errorf("restoring permanent creator: %w", err)
 	}
 
 	// Refresh the MCPB manifest.json in the staging dir so the lock-and-promote
@@ -361,6 +365,21 @@ func stageRunstateManuscripts(stagingDir string, state *PipelineState) error {
 		state.DiscoveryDir(),
 	}
 	dstRoot := filepath.Join(stagingDir, ".manuscripts", state.RunID)
+	researchJSON := filepath.Join(state.RunRoot(), "research.json")
+	if info, err := os.Stat(researchJSON); err == nil && !info.IsDir() {
+		target := filepath.Join(dstRoot, "research.json")
+		if _, statErr := os.Stat(target); statErr == nil {
+			// The working copy already has the publish-visible artifact.
+		} else if os.IsNotExist(statErr) {
+			if err := copyFile(researchJSON, target, info.Mode()); err != nil {
+				return fmt.Errorf("copying runstate research.json: %w", err)
+			}
+		} else {
+			return fmt.Errorf("checking %s in staging: %w", target, statErr)
+		}
+	} else if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("inspecting runstate research.json: %w", err)
+	}
 	for _, src := range sources {
 		name := filepath.Base(src)
 		info, err := os.Stat(src)
@@ -379,7 +398,7 @@ func stageRunstateManuscripts(stagingDir string, state *PipelineState) error {
 		} else if !os.IsNotExist(statErr) {
 			return fmt.Errorf("checking %s in staging: %w", target, statErr)
 		}
-		if err := CopyDir(src, target); err != nil {
+		if err := CopyPublishableManuscriptDir(src, target); err != nil {
 			return fmt.Errorf("copying runstate %s: %w", name, err)
 		}
 	}
@@ -404,6 +423,7 @@ func validatePhase5GateForPromote(workingDir string, state *PipelineState) error
 			manifest.CLIName = existing.CLIName
 		}
 		manifest.AuthType = existing.AuthType
+		manifest.SpecKind = existing.SpecKind
 	}
 
 	result := ValidatePhase5Gate(state.ProofsDir(), manifest)
@@ -421,8 +441,9 @@ func validatePhase5GateForPromote(workingDir string, state *PipelineState) error
 // polish run carry forward and new findings since polish surface as
 // pending. The error message points operators at the ledger file and
 // the pii-polish playbook.
-func validatePIIGateForPromote(workingDir string) error {
-	result, err := artifacts.RunPIIAudit(workingDir)
+func validatePIIGateForPromote(workingDir string, state *PipelineState) error {
+	opts := piiAuditOptionsForPromote(state)
+	result, err := artifacts.RunPIIAuditWithOptions(workingDir, opts)
 	if err != nil {
 		return fmt.Errorf("PII gate failed (scan error): %w", err)
 	}
@@ -447,9 +468,30 @@ func validatePIIGateForPromote(workingDir string) error {
 		msg += "gate failures:\n" + artifacts.FormatPIIGateFailures(result.Completion) + "\n"
 	}
 	msg += fmt.Sprintf("ledger: %s\n", ledgerPath)
-	msg += "scope: phase-1 detectors (order-id, ASIN, card-last-4, email, phone, ZIP+4, postal-address); standalone names are a future detector class.\n"
-	msg += "run `cli-printing-press pii-audit <dir>` and follow skills/printing-press-polish/references/pii-polish.md"
+	msg += "scope: phase-1 detectors (order-id, card-last-4, email, phone, ZIP+4, postal-address); ASINs and standalone names are a future detector class.\n"
+	command := "cli-printing-press pii-audit <dir>"
+	if opts.ManuscriptsDir != "" {
+		command += " --manuscripts-dir " + shellQuote(opts.ManuscriptsDir)
+	}
+	msg += fmt.Sprintf("run `%s`", command)
+	msg += " and follow skills/printing-press-polish/references/pii-polish.md"
 	return fmt.Errorf("%s", msg)
+}
+
+func shellQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
+}
+
+func piiAuditOptionsForPromote(state *PipelineState) artifacts.PIIAuditOptions {
+	if state == nil || state.RunID == "" {
+		return artifacts.PIIAuditOptions{}
+	}
+	runRoot := state.RunRoot()
+	info, err := os.Stat(runRoot)
+	if err != nil || !info.IsDir() {
+		return artifacts.PIIAuditOptions{}
+	}
+	return artifacts.PIIAuditOptions{ManuscriptsDir: runRoot}
 }
 
 // IsStale returns true if the lock's heartbeat is too old or its owner

@@ -40,13 +40,29 @@ func TestLibraryDirName(t *testing.T) {
 
 func TestMCP(t *testing.T) {
 	tests := map[string]string{
-		"stripe":  "stripe-pp-mcp",
-		"cal-com": "cal-com-pp-mcp",
-		"notion":  "notion-pp-mcp",
+		"stripe":        "stripe-pp-mcp",
+		"cal-com":       "cal-com-pp-mcp",
+		"notion":        "notion-pp-mcp",
+		"foo-pp":        "foo-pp-mcp",
+		"foo-pp-events": "foo-pp-events-pp-mcp",
 	}
 	for input, want := range tests {
 		if got := MCP(input); got != want {
 			t.Fatalf("MCP(%q) = %q, want %q", input, got, want)
+		}
+	}
+}
+
+func TestCLI(t *testing.T) {
+	tests := map[string]string{
+		"foo":           "foo-pp-cli",
+		"foo-pp":        "foo-pp-cli",
+		"foo-pp-events": "foo-pp-events-pp-cli",
+	}
+
+	for input, want := range tests {
+		if got := CLI(input); got != want {
+			t.Fatalf("CLI(%q) = %q, want %q", input, got, want)
 		}
 	}
 }
@@ -71,6 +87,16 @@ func TestIsThinCommandShort(t *testing.T) {
 	}
 }
 
+func TestAuthoredDescriptionPreservesAuthoredOneLiner(t *testing.T) {
+	in := "The first CLI for Scrape.do: requests, browsers, proxies, retries, and local SQLite analytics that keep agent workflows grounded without losing the brand dot or clause richness."
+
+	got := AuthoredDescription(in)
+
+	if got != in {
+		t.Fatalf("AuthoredDescription() = %q, want full authored one-liner %q", got, in)
+	}
+}
+
 func TestEnvPrefix(t *testing.T) {
 	tests := map[string]string{
 		"pokeapi":       "POKEAPI",
@@ -91,6 +117,29 @@ func TestEnvPrefix(t *testing.T) {
 	for input, want := range tests {
 		if got := EnvPrefix(input); got != want {
 			t.Fatalf("EnvPrefix(%q) = %q, want %q", input, got, want)
+		}
+	}
+}
+
+func TestCamelIdentifier(t *testing.T) {
+	tests := map[string]string{
+		// ASCII inputs are unaffected by the fold (fast path), so existing
+		// generated identifiers are unchanged.
+		"user_name": "UserName",
+		"user-id":   "UserId",
+		"$ref":      "Ref",
+		"123abc":    "V123abc",
+		"":          "",
+		// Non-ASCII names fold to clean ASCII identifiers instead of being
+		// sliced mid-codepoint (the prior byte-indexed bug corrupted these).
+		"éclair":  "Eclair",
+		"café_id": "CafeId",
+		"東京":      "DongJing",
+		"русский": "Russkii",
+	}
+	for input, want := range tests {
+		if got := CamelIdentifier(input); got != want {
+			t.Fatalf("CamelIdentifier(%q) = %q, want %q", input, got, want)
 		}
 	}
 }

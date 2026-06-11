@@ -22,12 +22,15 @@ func TestSkillRendersFrontmatterAndCapabilities(t *testing.T) {
 
 	apiSpec := minimalSpec("finance")
 	apiSpec.Category = "commerce"
+	apiSpec.Regions = []string{"US", "*"}
+	apiSpec.APILanguage = "en-US"
 	outputDir := filepath.Join(t.TempDir(), "finance-pp-cli")
 	gen := New(apiSpec, outputDir)
 	gen.Narrative = &ReadmeNarrative{
 		Headline:       "Quotes, charts, and a local portfolio nothing else has",
 		ValueProp:      "Quotes, charts, fundamentals, options chains, and a SQLite-backed portfolio tracker.",
 		WhenToUse:      "Reach for this CLI when an agent needs quotes, fundamentals, or persistent portfolio state against Yahoo Finance.",
+		AntiTriggers:   []string{"Tasks that require placing trades or moving money", "Brokerage account management beyond read-only portfolio analysis"},
 		TriggerPhrases: []string{"quote AAPL", "check my portfolio", "options for TSLA"},
 		Recipes: []Recipe{
 			{Title: "Morning digest", Command: "finance-pp-cli digest --watchlist tech", Explanation: "Biggest movers across a named watchlist."},
@@ -57,10 +60,34 @@ func TestSkillRendersFrontmatterAndCapabilities(t *testing.T) {
 		"frontmatter description should list domain-specific trigger phrases verbatim (backtick-delimited)")
 	assert.True(t, strings.Contains(content, "library/commerce/finance/cmd/finance-pp-cli"),
 		"openclaw install manifest should use the API's category and slug-only directory")
+	assert.True(t, strings.Contains(content, `regions: ["US", "*"]`),
+		"frontmatter should expose structured geographic scope")
+	assert.True(t, strings.Contains(content, `api_language: "en-US"`),
+		"frontmatter should expose the API's native language tag")
+	require.True(t, strings.HasPrefix(content, "---\n"), "frontmatter should open with ---")
+	end := strings.Index(content[4:], "\n---\n")
+	require.NotEqual(t, -1, end, "frontmatter should close with ---")
+	body := strings.TrimSuffix(strings.TrimPrefix(content[:4+end+5], "---\n"), "---\n")
+	var parsed struct {
+		Regions     []string `yaml:"regions"`
+		APILanguage string   `yaml:"api_language"`
+	}
+	require.NoError(t, yaml.Unmarshal([]byte(body), &parsed),
+		"frontmatter with region/language metadata must be valid YAML; content was:\n%s", body)
+	assert.Equal(t, []string{"US", "*"}, parsed.Regions)
+	assert.Equal(t, "en-US", parsed.APILanguage)
 
 	// Body
 	assert.True(t, strings.Contains(content, "## When to Use This CLI"),
 		"WhenToUse narrative should render as its own section")
+	assert.True(t, strings.Contains(content, "## Anti-triggers"),
+		"AntiTriggers narrative should render as its own section")
+	assert.True(t, strings.Contains(content, "- Tasks that require placing trades or moving money"),
+		"anti-triggers should render as explicit bullets")
+	assert.True(t, strings.Contains(content, "- Brokerage account management beyond read-only portfolio analysis"),
+		"all anti-trigger bullets should render")
+	assert.False(t, strings.Contains(content, "## When Not to Use This CLI"),
+		"generic read-only boundary should be omitted when anti-triggers are present")
 	assert.True(t, strings.Contains(content, "## Unique Capabilities"),
 		"Novel features should appear as Unique Capabilities so agents don't need --help discovery")
 	assert.True(t, strings.Contains(content, "### Local state that compounds"),
@@ -122,6 +149,8 @@ func TestSkillFallsBackWhenNarrativeAbsent(t *testing.T) {
 		"description falls back to spec description")
 	assert.False(t, strings.Contains(content, "## When to Use This CLI"),
 		"WhenToUse section should be omitted when narrative is absent")
+	assert.False(t, strings.Contains(content, "## Anti-triggers"),
+		"Anti-triggers section should be omitted when narrative is absent")
 	assert.False(t, strings.Contains(content, "## Recipes"),
 		"Recipes section should be omitted when narrative is absent")
 	assert.True(t, strings.Contains(content, "## Auth Setup"),
@@ -681,6 +710,8 @@ func TestSkillFrontmatterMetadataOmitsUnknownCategoryInstall(t *testing.T) {
 		"empty Category should not bake a placeholder category into install metadata")
 	assert.Contains(t, content, "npx -y @mvanhorn/printing-press-library install uncategorized --cli-only",
 		"empty Category should keep the category-agnostic installer path")
+	assert.NotContains(t, content, "--cli-only --bin-dir",
+		"empty Category should rely on the installer default bin directory")
 }
 
 // TestSkillNoExtraCommandsIsBackwardCompatible asserts the template emits

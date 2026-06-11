@@ -80,6 +80,8 @@ if [ -n "$ANTHROPIC_API_KEY" ] || [ -n "$OPENAI_API_KEY" ] || [ -n "$BROWSER_USE
 fi
 ```
 
+Treat `command -v agent-browser` as sufficient only when agent-browser was already present before this step, or when this run just installed it and the user-run `agent-browser install` step completed. This detection step does not launch agent-browser to prove browser-cache readiness for pre-existing installs. If this run attempted the package-manager install but the post-install step was declined, failed, or unclear, set `SNIFF_BACKEND="none"` and fall back to manual HAR; do not let a second detection pass select the half-installed binary. If a pre-existing agent-browser later reports missing browser binaries, surface `! agent-browser install` and use a fallback backend until the user confirms it completed.
+
 If a tool is found, report: "Using **<tool>** for temporary traffic capture during generation (CLI-driven mode — no LLM key needed)." and proceed to Step 1c to verify compatibility.
 
 **Important:** browser-use has two modes: autonomous Agent mode (requires an LLM API key like ANTHROPIC_API_KEY) and CLI mode (open/eval/scroll — no key needed). **Always use CLI mode for browser-sniff.** It is more reliable, version-stable, and does not require the user to provide an additional API key. Do NOT attempt to use browser-use's Python `Agent` class — it requires an LLM key that may not be available.
@@ -99,7 +101,7 @@ If either MCP flag is true, extend the status report:
 
 #### Step 1b: Install capture tool (fallback — preflight should have prompted first)
 
-Preflight (`references/setup-checks.md` section 5) offers to install browser-use and agent-browser on every run, so most users arrive at Step 1 with one or both already installed. This step is a fallback for the case where the user declined the preflight prompt and the current run actually needs a browser backend.
+Preflight (`references/setup-checks.md` section 6) offers to install browser-use and agent-browser on every run, so most users arrive at Step 1 with one or both already installed. This step is a fallback for the case where the user declined the preflight prompt and the current run actually needs a browser backend.
 
 If neither tool is installed, offer to install via `AskUserQuestion`. Do not install automatically:
 
@@ -143,7 +145,15 @@ else
 fi
 ```
 
-After install, re-run detection. If `agent-browser` is now available, set `SNIFF_BACKEND="agent-browser"` and proceed to Step 1c. If install failed, show the error and fall back to manual HAR.
+After the brew or npm install succeeds, use the same post-install rule as preflight (`references/setup-checks.md` section 6): complete agent-browser's browser-binary setup as a user-run step:
+
+```text
+! agent-browser install
+```
+
+The leading `!` is intentional: surface the command for the user to run manually instead of invoking it through the agent's shell tool. Do not treat `command -v agent-browser` alone as a complete install after the package-manager step; the `agent-browser install` step must complete before browser-sniff flows rely on it. If the user declines the manual step or completion is unclear, do not run it yourself; fall back to manual HAR. If agent-browser was already installed before this Step 1b fallback, do not rerun redundant setup here.
+
+After install, re-run detection. If `agent-browser` is now available and the user-run `agent-browser install` step completed, set `SNIFF_BACKEND="agent-browser"` and proceed to Step 1c. If install failed, show the error and fall back to manual HAR.
 
 **If user picks manual HAR**, ask the user for a HAR file path and skip to Step 3.
 
@@ -286,14 +296,16 @@ Close the headed browser and restart headless with the saved state.
 
 **For HAR export (option 3):** Guide the user through the DevTools HAR-export flow. Make clear that a HAR is discovery input, not a promise that every captured HTML/XHR route becomes a printed CLI command. After analyzing the HAR, keep only surfaces that replay through lightweight HTTP/Surf/browser-compatible HTTP, browser-clearance cookie import plus replay, or structured HTML/SSR/RSS extraction. If the HAR only proves live page-context execution works, HOLD or pivot scope.
 
+**Manual HAR body capture pitfall.** Chrome can export page responses from disk cache as `206` partial-content entries with empty `response.content.text`, even when the user chose a HAR-with-content export. If browser-sniff analysis reports many `206` entries or missing bodies, tell the user the capture did not preserve response bodies and give the fix directly: in DevTools > Network, check **Disable cache**, then hard-reload each page while DevTools stays open before exporting the HAR. If Chrome still omits bodies, ask for a Firefox HAR export instead; Firefox's HAR export is more reliable for preserving page bodies.
+
 **Chrome 147+ DevTools HAR export — concrete instructions.** Recent Chrome versions (147+) removed "Save all as HAR with content" from the right-click menu in the Network panel. The download-arrow icon at the top of the Network panel is now the only stable export path. Walk the user through these steps in order — they are the steps a user got stuck on in a recent session, so the language is deliberately literal:
 
 1. **Open DevTools.** `Cmd+Option+I` (macOS) or `Ctrl+Shift+I` (Windows/Linux). If DevTools is already open but on the wrong tab, the next step covers it.
 2. **Switch to the Network panel.** It is in the top tab strip alongside Elements, Console, Sources, Performance. If DevTools is narrow, the Network tab may be hidden behind a `>>` overflow chevron at the right end of the tab strip — click `>>` and pick **Network**. Do not pick "Recorder" — that is a different panel.
 3. **Confirm recording is on.** A red dot at the top-left of the Network panel means recording is on. If it is gray/black, click it once to enable.
-4. **Check "Preserve log" and "Disable cache"** — both are checkboxes in the Network panel toolbar. Preserve log keeps records across navigations; disable cache forces fresh requests so the HAR contains real network activity.
+4. **Check "Preserve log" and "Disable cache"** — both are checkboxes in the Network panel toolbar. Preserve log keeps records across navigations; disable cache forces fresh requests so the HAR contains real network activity and page response bodies.
 5. **Clear any prior requests.** Click the 🚫 (clear / no-entry) icon in the toolbar to start with an empty log.
-6. **Reproduce the user flow on the target site** — navigate, click into the section the printed CLI needs, scroll, interact. Wait for network activity to settle between actions.
+6. **Hard-reload each page, then reproduce the user flow on the target site** — hard-reload with DevTools still open before interacting so Chrome records full `200` responses instead of cached `206` bodies. Then navigate, click into the section the printed CLI needs, scroll, interact. Wait for network activity to settle between actions.
 7. **Export the HAR.** Click the **download-arrow icon** at the top-left of the Network panel toolbar (between the upload-arrow icon `↑` and the record/clear icons — it looks like a `↓` arrow with a horizontal bar underneath). A macOS/Windows save dialog opens. Save as `<api>-capture.har` somewhere accessible like `~/Downloads/`.
 8. **Tell the agent the path.** The agent runs `cli-printing-press browser-sniff --har <path>` next.
 
@@ -892,10 +904,13 @@ If the thin-results check triggers a re-sniff that discovers additional endpoint
 After capture, inspect the collected responses before generating a spec. A browser-sniff is **not successful** if it only captured challenge, login, or access-denied pages.
 
 Treat the capture as failed when all or nearly all captured target-site responses match one of these:
+- HTTP `200` responses that only contain a content-less shell, interstitial, deterministic-size truncation, or other placeholder body with no real site data
 - HTTP `403` or `429` HTML with Cloudflare/Vercel/WAF/DataDome/PerimeterX/CAPTCHA markers
 - titles or body text such as "Just a moment", "Access denied", "Please enable JavaScript", "captcha", "challenge"
 - only login redirects/pages when the user expected an authenticated capture
 - no API-looking requests, no SSR embedded data, no structured HTML/feed data, and no page-context fetch evidence
+
+Do not treat a 200-served shell as evidence for `IP-blocked`, `rate-limited`, or `wait it out`. It is a clearance challenge until proven otherwise. Escalate through the same recovery menu as explicit 403/429 challenge pages, and use chrome-MCP to inspect the live browser wall when that backend is available, even if the eventual cookie-warm path still needs user help.
 
 When this happens, do not continue to Phase 2 with a challenge-page spec. Compose the recovery menu **per the availability of the MCP fallback flags set in Step 1** — the menu shape changes based on what's reachable in this runtime. Use the table below to pick the option set, then present via `AskUserQuestion`.
 
@@ -908,17 +923,17 @@ When this happens, do not continue to Phase 2 with a challenge-page spec. Compos
 | true | false | (1) Try cleared-browser capture again, (2) **Try chrome-MCP** — recommended on anti-bot trigger, (3) I'll provide a HAR from DevTools, (4) Discuss alternate CLI scope |
 | true | true | (1) Try cleared-browser capture again, (2) **Try chrome-MCP** — recommended on anti-bot trigger, (3) I'll provide a HAR from DevTools — I'll guide you with screenshots of your DevTools window, (4) Discuss alternate CLI scope |
 
-**Recommended-badge rule.** When the menu fires because of an anti-bot block (the trigger criteria above: 403/429 with WAF markers, "Just a moment", challenge titles, login-redirect-only when authenticated capture was expected), chrome-MCP carries the **(Recommended)** badge whenever it is present in the menu, regardless of whether computer-use is also detected — chrome-MCP is the highest-leverage path against an anti-bot block because it uses the user's real Chrome session. In other failure modes (thin results from the Step 2c check, time-budget bailout), no option carries the Recommended badge — let the user pick based on context.
+**Recommended-badge rule.** When the menu fires because of an anti-bot block (the trigger criteria above: HTTP 200 challenge shells or truncations, 403/429 with WAF markers, "Just a moment", challenge titles, login-redirect-only when authenticated capture was expected), chrome-MCP carries the **(Recommended)** badge whenever it is present in the menu, regardless of whether computer-use is also detected — chrome-MCP is the highest-leverage path against an anti-bot block because it uses the user's real Chrome session. In other failure modes (thin results from the Step 2c check, time-budget bailout), no option carries the Recommended badge — let the user pick based on context.
 
 **Question stem (teach the chrome-MCP mechanic when present).** When chrome-MCP is in the menu and the user has not seen this menu before in the current session, the question stem must teach the mechanic in one line. The user is mid-failure and may have never encountered chrome-MCP-as-fallback.
 
 When chrome-MCP IS in the menu:
 
-> "The browser capture only saw challenge or login pages, so it did not discover the real website data/API surface. The Chrome-extension MCP can capture from your existing Chrome window — pick this if your Chrome is open and you're already logged in to the target site. What should we do next?"
+> "The browser capture only saw challenge/login pages or a 200-served shell, so it did not discover the real website data/API surface. The Chrome-extension MCP can capture from your existing Chrome window — pick this if your Chrome is open and you're already logged in to the target site. What should we do next?"
 
 When chrome-MCP is NOT in the menu (current 3-option case, unchanged):
 
-> "The browser capture only saw challenge or login pages, so it did not discover the real website data/API surface. What should we do next?"
+> "The browser capture only saw challenge/login pages or a 200-served shell, so it did not discover the real website data/API surface. What should we do next?"
 
 **Fixed option labels and bodies.** Use these exact strings as the `AskUserQuestion` option labels and descriptions — the implementer should not paraphrase. Labels are short (4-7 words), self-contained (some harnesses render labels without descriptions), and front-load the differentiator. Composition is per the table above; pick the option set for the flag combination, then mark Recommended where the rule above says.
 
@@ -1008,6 +1023,12 @@ Two fields trip up hand-edits often enough to call out:
 
 - **`version`** is the literal string `"1"` — not semver, not `"1.0.0"`. The downstream parser rejects any other value with `unsupported traffic analysis version`.
 - **Confidence fields** are numbers from `0` to `1`, not strings such as `"high"`.
+
+Before hand-writing or repairing the sniffed YAML spec, check
+`spec-format.md`; two common traps are `types.X.fields` list shape (`- name:`
+items, not a map) and the `response_format` enum (`json`, `csv`, `html`, or `binary`;
+use `html` only for GET/HEAD HTML and embedded-JSON surfaces, with
+`html_extract` when the built-in page, links, or embedded-json modes fit).
 
 #### Step 4: Report and update spec source
 

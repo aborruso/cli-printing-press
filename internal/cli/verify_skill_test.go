@@ -154,6 +154,231 @@ func newSearchCmd() *cobra.Command {
 	require.Contains(t, string(out), "All checks passed")
 }
 
+func TestVerifySkill_RecognizesTypedSliceAndMapFlagDeclarations(t *testing.T) {
+	t.Parallel()
+
+	bin := buildPrintingPressBinary(t)
+	dir := t.TempDir()
+
+	// One command declaring a representative of each newly-recognized pflag
+	// family — slice-int, slice-float, slice-bool, map (StringToString), and
+	// net.IP — all referenced in SKILL.md. A typo in any alternation entry of
+	// FLAG_DECL_RE would make that flag read as undeclared and fail the run.
+	skill := "---\nname: pp-fixture\n---\n\n# Fixture\n\n```bash\nfixture-pp-cli search \"chicken\" --tag-id 1 --tag-id 2 --score 0.5 --enabled true --label k=v --addr 1.2.3.4\n```\n"
+	writeVerifySkillFixture(t, dir, map[string]string{
+		"search.go": `package cli
+import (
+	"net"
+
+	"github.com/spf13/cobra"
+)
+func newSearchCmd() *cobra.Command {
+	var (
+		tagIDs []int
+		scores []float64
+		flags  []bool
+		labels map[string]string
+		addr   net.IP
+	)
+	cmd := &cobra.Command{Use: "search <query>"}
+	cmd.Flags().IntSliceVar(&tagIDs, "tag-id", nil, "Tag IDs")
+	cmd.Flags().Float64SliceVar(&scores, "score", nil, "Scores")
+	cmd.Flags().BoolSliceVar(&flags, "enabled", nil, "Enabled flags")
+	cmd.Flags().StringToStringVar(&labels, "label", nil, "Labels")
+	cmd.Flags().IPVar(&addr, "addr", nil, "Address")
+	return cmd
+}
+`,
+	}, skill)
+
+	out, err := exec.Command(bin, "verify-skill", "--dir", dir, "--only", "flag-commands").CombinedOutput()
+	require.NoError(t, err, "typed slice/map/IP flag declarations should be recognized: %s", string(out))
+	require.Contains(t, string(out), "All checks passed")
+}
+
+func TestVerifySkill_FlagChecksNormalizeEqualsSyntax(t *testing.T) {
+	t.Parallel()
+
+	bin := buildPrintingPressBinary(t)
+	dir := t.TempDir()
+
+	skill := "---\nname: pp-fixture\n---\n\n# Fixture\n\n```bash\n" +
+		"fixture-pp-cli search --since=24h --score-gte=7\n" +
+		"fixture-pp-cli search --since 24h --score-gte 7\n" +
+		"```\n"
+	writeVerifySkillFixture(t, dir, map[string]string{
+		"search.go": `package cli
+import "github.com/spf13/cobra"
+func newSearchCmd() *cobra.Command {
+	var since string
+	var scoreGTE int
+	cmd := &cobra.Command{Use: "search"}
+	cmd.Flags().StringVar(&since, "since", "", "Lookback window")
+	cmd.Flags().IntVar(&scoreGTE, "score-gte", 0, "Minimum score")
+	return cmd
+}
+`,
+		"root.go": `package cli
+import "github.com/spf13/cobra"
+func Execute() error {
+	rootCmd := &cobra.Command{Use: "fixture-pp-cli"}
+	rootCmd.AddCommand(newSearchCmd())
+	return rootCmd.Execute()
+}
+`,
+	}, skill)
+
+	out, err := exec.Command(bin, "verify-skill", "--dir", dir, "--only", "flag-names").CombinedOutput()
+	require.NoError(t, err, "--flag=value syntax should resolve to declared flag names: %s", string(out))
+	require.Contains(t, string(out), "All checks passed")
+
+	out, err = exec.Command(bin, "verify-skill", "--dir", dir, "--only", "flag-commands").CombinedOutput()
+	require.NoError(t, err, "--flag=value syntax should resolve to declared command flags: %s", string(out))
+	require.Contains(t, string(out), "All checks passed")
+}
+
+func TestVerifySkill_ShellOperatorsDoNotBecomePositionals(t *testing.T) {
+	t.Parallel()
+
+	bin := buildPrintingPressBinary(t)
+	dir := t.TempDir()
+
+	skill := "---\nname: pp-fixture\n---\n\n# Fixture\n\n```bash\n" +
+		"fixture-pp-cli export --format json > export.json\n" +
+		"fixture-pp-cli export --format json>export.json\n" +
+		"fixture-pp-cli export --format json|jq .\n" +
+		"fixture-pp-cli export --format json; echo done\n" +
+		"fixture-pp-cli export --format json < export.json\n" +
+		"fixture-pp-cli export --format json 2>export.err\n" +
+		"fixture-pp-cli export --filter \"score > 10\"\n" +
+		"fixture-pp-cli export --filter \"score>10\"\n" +
+		"fixture-pp-cli export --filter 'score > 10'\n" +
+		"fixture-pp-cli export --filter 'score \\' > export.json\n" +
+		"```\n"
+	writeVerifySkillFixture(t, dir, map[string]string{
+		"export.go": `package cli
+import "github.com/spf13/cobra"
+func newExportCmd() *cobra.Command {
+	var format string
+	var filter string
+	cmd := &cobra.Command{Use: "export"}
+	cmd.Flags().StringVar(&format, "format", "", "Output format")
+	cmd.Flags().StringVar(&filter, "filter", "", "Filter expression")
+	return cmd
+}
+`,
+		"root.go": `package cli
+import "github.com/spf13/cobra"
+func Execute() error {
+	rootCmd := &cobra.Command{Use: "fixture-pp-cli"}
+	rootCmd.AddCommand(newExportCmd())
+	return rootCmd.Execute()
+}
+`,
+	}, skill)
+
+	out, err := exec.Command(bin, "verify-skill", "--dir", dir, "--only", "positional-args").CombinedOutput()
+	require.NoError(t, err, "shell operators must not be counted as positionals: %s", string(out))
+	require.Contains(t, string(out), "All checks passed")
+}
+
+func TestVerifySkill_PositionalArgsStillFailWithoutShellOperator(t *testing.T) {
+	t.Parallel()
+
+	bin := buildPrintingPressBinary(t)
+	dir := t.TempDir()
+
+	skill := "---\nname: pp-fixture\n---\n\n# Fixture\n\n```bash\nfixture-pp-cli export one.json two.json\n```\n"
+	writeVerifySkillFixture(t, dir, map[string]string{
+		"export.go": `package cli
+import "github.com/spf13/cobra"
+func newExportCmd() *cobra.Command {
+	return &cobra.Command{Use: "export"}
+}
+`,
+		"root.go": `package cli
+import "github.com/spf13/cobra"
+func Execute() error {
+	rootCmd := &cobra.Command{Use: "fixture-pp-cli"}
+	rootCmd.AddCommand(newExportCmd())
+	return rootCmd.Execute()
+}
+`,
+	}, skill)
+
+	out, err := exec.Command(bin, "verify-skill", "--dir", dir, "--only", "positional-args").CombinedOutput()
+	require.Error(t, err, "real positional args must still fail verify-skill")
+	require.Contains(t, string(out), "[positional-args]")
+	require.Contains(t, string(out), "got 2 positional args")
+}
+
+// A positional that follows an inline-value flag (--flag=value) must still be
+// counted as a positional, not swallowed as the flag's value. Without the
+// inline-value guard the parser drops `report.json` and the check passes
+// (false negative); with it the unexpected positional is correctly flagged.
+func TestVerifySkill_PositionalAfterInlineValueFlagIsCounted(t *testing.T) {
+	t.Parallel()
+
+	bin := buildPrintingPressBinary(t)
+	dir := t.TempDir()
+
+	skill := "---\nname: pp-fixture\n---\n\n# Fixture\n\n```bash\nfixture-pp-cli export --format=json report.json\n```\n"
+	writeVerifySkillFixture(t, dir, map[string]string{
+		"export.go": `package cli
+import "github.com/spf13/cobra"
+func newExportCmd() *cobra.Command {
+	var format string
+	cmd := &cobra.Command{Use: "export"}
+	cmd.Flags().StringVar(&format, "format", "", "Output format")
+	return cmd
+}
+`,
+		"root.go": `package cli
+import "github.com/spf13/cobra"
+func Execute() error {
+	rootCmd := &cobra.Command{Use: "fixture-pp-cli"}
+	rootCmd.AddCommand(newExportCmd())
+	return rootCmd.Execute()
+}
+`,
+	}, skill)
+
+	out, err := exec.Command(bin, "verify-skill", "--dir", dir, "--only", "positional-args").CombinedOutput()
+	require.Error(t, err, "a positional after --flag=value must be counted, not swallowed: %s", string(out))
+	require.Contains(t, string(out), "[positional-args]")
+	require.Contains(t, string(out), "got 1 positional args")
+}
+
+func TestVerifySkill_PlaceholderPositionalsStillFail(t *testing.T) {
+	t.Parallel()
+
+	bin := buildPrintingPressBinary(t)
+	dir := t.TempDir()
+
+	skill := "---\nname: pp-fixture\n---\n\n# Fixture\n\n```bash\nfixture-pp-cli export <id>\n```\n"
+	writeVerifySkillFixture(t, dir, map[string]string{
+		"export.go": `package cli
+import "github.com/spf13/cobra"
+func newExportCmd() *cobra.Command {
+	return &cobra.Command{Use: "export"}
+}
+`,
+		"root.go": `package cli
+import "github.com/spf13/cobra"
+func Execute() error {
+	rootCmd := &cobra.Command{Use: "fixture-pp-cli"}
+	rootCmd.AddCommand(newExportCmd())
+	return rootCmd.Execute()
+}
+`,
+	}, skill)
+
+	out, err := exec.Command(bin, "verify-skill", "--dir", dir, "--only", "positional-args").CombinedOutput()
+	require.Error(t, err, "placeholder positionals must still fail verify-skill")
+	require.Contains(t, string(out), "[positional-args]")
+	require.Contains(t, string(out), "got 1 positional args")
+}
+
 // TestVerifySkill_FlagDeclaredViaHelper asserts the verifier accepts a flag
 // declared one level deep through a shared helper invoked with cmd as first
 // arg, e.g. addTargetFlags(cmd, &t) whose body declares the flag.
@@ -280,8 +505,8 @@ func Execute() error {
 
 // TestVerifySkill_IgnoresExternalToolFlags is the regression guard for
 // the trigger-dev / linear SKILL.md slip: the install instructions contain
-// `npx -y @mvanhorn/printing-press-library install <api> --cli-only`. --cli-only
-// belongs to the outer Printing Press installer, not to <api>-pp-cli, so
+// `npx -y @mvanhorn/printing-press-library install <api> --cli-only --bin-dir ~/.local/bin`.
+// --cli-only and --bin-dir belong to the outer Printing Press installer, not to <api>-pp-cli, so
 // it must not be reported as an undeclared flag-names finding. Before the
 // scoping fix, flag-names regex-scanned the whole SKILL.md and fired on
 // every external-tool flag, which led an automation loop to strip the
@@ -293,10 +518,10 @@ func TestVerifySkill_IgnoresExternalToolFlags(t *testing.T) {
 	bin := buildPrintingPressBinary(t)
 	dir := t.TempDir()
 
-	// SKILL.md uses --cli-only on an npx invocation (not on fixture-pp-cli)
+	// SKILL.md uses installer flags on an npx invocation (not on fixture-pp-cli)
 	// and uses only declared flags on its own binary's recipes.
 	skill := "---\nname: pp-fixture\n---\n\n# Fixture\n\n## Prerequisites\n\n" +
-		"```bash\nnpx -y @mvanhorn/printing-press-library install fixture --cli-only\n```\n\n" +
+		"```bash\nnpx -y @mvanhorn/printing-press-library install fixture --cli-only --bin-dir ~/.local/bin\n```\n\n" +
 		"## Usage\n\n```bash\nfixture-pp-cli search --limit 5\n```\n"
 	writeVerifySkillFixture(t, dir, map[string]string{
 		"search.go": `package cli
@@ -321,6 +546,140 @@ func Execute() error {
 	out, err := exec.Command(bin, "verify-skill", "--dir", dir).CombinedOutput()
 	require.NoError(t, err, "external-tool flags must not produce a flag-names finding: %s", string(out))
 	require.NotContains(t, string(out), "--cli-only", "verifier must not mention an external-tool flag")
+	require.NotContains(t, string(out), "--bin-dir", "verifier must not mention an external-tool flag")
+}
+
+// TestVerifySkill_DetectsUnquotedShellVariable is the regression guard for
+// generated bash blocks teaching agents to expand shell variables without
+// double quotes.
+func TestVerifySkill_DetectsUnquotedShellVariable(t *testing.T) {
+	t.Parallel()
+
+	bin := buildPrintingPressBinary(t)
+	dir := t.TempDir()
+
+	skill := "---\nname: pp-fixture\n---\n\n# Fixture\n\n```bash\nfixture-pp-cli export --output $OUT_FILE\n```\n"
+	writeVerifySkillFixture(t, dir, map[string]string{
+		"export.go": `package cli
+import "github.com/spf13/cobra"
+func newExportCmd() *cobra.Command {
+	var output string
+	cmd := &cobra.Command{Use: "export"}
+	cmd.Flags().StringVar(&output, "output", "", "Output file")
+	return cmd
+}
+`,
+		"root.go": `package cli
+import "github.com/spf13/cobra"
+func Execute() error {
+	rootCmd := &cobra.Command{Use: "fixture-pp-cli"}
+	rootCmd.AddCommand(newExportCmd())
+	return rootCmd.Execute()
+}
+`,
+	}, skill)
+
+	out, err := exec.Command(bin, "verify-skill", "--dir", dir, "--only", "shell-var-quotes").CombinedOutput()
+	require.Error(t, err, "unquoted shell variables in bash blocks must fail verify-skill")
+	require.Contains(t, string(out), "shell-var-quotes")
+	require.Contains(t, string(out), "$OUT_FILE")
+}
+
+func TestVerifySkill_DefaultChecksIncludeShellVarQuotes(t *testing.T) {
+	t.Parallel()
+
+	bin := buildPrintingPressBinary(t)
+	dir := t.TempDir()
+
+	skill := "---\nname: pp-fixture\n---\n\n# Fixture\n\n```bash\nfixture-pp-cli export --output $OUT_FILE\n```\n"
+	writeVerifySkillFixture(t, dir, map[string]string{
+		"export.go": `package cli
+import "github.com/spf13/cobra"
+func newExportCmd() *cobra.Command {
+	var output string
+	cmd := &cobra.Command{Use: "export"}
+	cmd.Flags().StringVar(&output, "output", "", "Output file")
+	return cmd
+}
+`,
+		"root.go": `package cli
+import "github.com/spf13/cobra"
+func Execute() error {
+	rootCmd := &cobra.Command{Use: "fixture-pp-cli"}
+	rootCmd.AddCommand(newExportCmd())
+	return rootCmd.Execute()
+}
+`,
+	}, skill)
+
+	out, err := exec.Command(bin, "verify-skill", "--dir", dir).CombinedOutput()
+	require.Error(t, err, "default verify-skill run must include shell-var-quotes")
+	require.Contains(t, string(out), "shell-var-quotes")
+	require.Contains(t, string(out), "$OUT_FILE")
+}
+
+func TestVerifySkill_DetectsUnquotedShellVariableInIndentedFence(t *testing.T) {
+	t.Parallel()
+
+	bin := buildPrintingPressBinary(t)
+	dir := t.TempDir()
+
+	skill := "---\nname: pp-fixture\n---\n\n# Fixture\n\n1. Export a file:\n   ```bash\n   fixture-pp-cli export --output $OUT_FILE\n   ```\n"
+	writeVerifySkillFixture(t, dir, map[string]string{
+		"export.go": `package cli
+import "github.com/spf13/cobra"
+func newExportCmd() *cobra.Command {
+	var output string
+	cmd := &cobra.Command{Use: "export"}
+	cmd.Flags().StringVar(&output, "output", "", "Output file")
+	return cmd
+}
+`,
+		"root.go": `package cli
+import "github.com/spf13/cobra"
+func Execute() error {
+	rootCmd := &cobra.Command{Use: "fixture-pp-cli"}
+	rootCmd.AddCommand(newExportCmd())
+	return rootCmd.Execute()
+}
+`,
+	}, skill)
+
+	out, err := exec.Command(bin, "verify-skill", "--dir", dir, "--only", "shell-var-quotes").CombinedOutput()
+	require.Error(t, err, "indented bash fences must still be scanned")
+	require.Contains(t, string(out), "$OUT_FILE")
+}
+
+func TestVerifySkill_AllowsQuotedShellVariable(t *testing.T) {
+	t.Parallel()
+
+	bin := buildPrintingPressBinary(t)
+	dir := t.TempDir()
+
+	skill := "---\nname: pp-fixture\n---\n\n# Fixture\n\n```bash\nfixture-pp-cli export --output \"$OUT_FILE\"\nrm -f \"${TMPDIR:-/tmp}/fixture-output.json\"\n```\n"
+	writeVerifySkillFixture(t, dir, map[string]string{
+		"export.go": `package cli
+import "github.com/spf13/cobra"
+func newExportCmd() *cobra.Command {
+	var output string
+	cmd := &cobra.Command{Use: "export"}
+	cmd.Flags().StringVar(&output, "output", "", "Output file")
+	return cmd
+}
+`,
+		"root.go": `package cli
+import "github.com/spf13/cobra"
+func Execute() error {
+	rootCmd := &cobra.Command{Use: "fixture-pp-cli"}
+	rootCmd.AddCommand(newExportCmd())
+	return rootCmd.Execute()
+}
+`,
+	}, skill)
+
+	out, err := exec.Command(bin, "verify-skill", "--dir", dir, "--only", "shell-var-quotes").CombinedOutput()
+	require.NoError(t, err, "quoted shell variables should pass verify-skill: %s", string(out))
+	require.Contains(t, string(out), "All checks passed")
 }
 
 // TestVerifySkill_CanonicalSectionsPassesOnFreshFixture confirms the
@@ -409,7 +768,7 @@ func Execute() error { return (&cobra.Command{Use: "`+name+`-pp-cli"}).Execute()
 `), 0o644))
 
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "go.mod"),
-		[]byte("module github.com/example/"+name+"-pp-cli\n\ngo 1.26.3\n"), 0o644))
+		[]byte("module github.com/example/"+name+"-pp-cli\n\ngo 1.26.4\n"), 0o644))
 
 	manifest := fmt.Sprintf(`{"api_name":%q,"cli_name":%q,"category":%q}`,
 		name, name+"-pp-cli", category)

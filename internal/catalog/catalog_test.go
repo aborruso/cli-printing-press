@@ -24,6 +24,8 @@ verified_date: "2026-03-23"
 homepage: https://example.com
 owner: test-owner
 owner_name: Trevin Chow
+regions: [NL, EU]
+api_language: nl
 mcp:
   transport: [stdio, http]
   orchestration: code
@@ -47,6 +49,8 @@ notes: Example fixture.
 	assert.Equal(t, "https://example.com", entry.Homepage)
 	assert.Equal(t, "test-owner", entry.Owner)
 	assert.Equal(t, "Trevin Chow", entry.OwnerName)
+	assert.Equal(t, []string{"NL", "EU"}, entry.Regions)
+	assert.Equal(t, "nl", entry.APILanguage)
 	assert.Equal(t, []string{"stdio", "http"}, entry.MCP.Transport)
 	assert.Equal(t, "code", entry.MCP.Orchestration)
 	assert.Equal(t, "hidden", entry.MCP.EndpointTools)
@@ -206,6 +210,34 @@ func TestValidateEntry(t *testing.T) {
 			wantErr: `auth_key_url must start with "https://"`,
 		},
 		{
+			name: "regions empty entry",
+			mutate: func(e *Entry) {
+				e.Regions = []string{"NL", ""}
+			},
+			wantErr: "regions[1] must not be empty",
+		},
+		{
+			name: "regions lowercase rejected",
+			mutate: func(e *Entry) {
+				e.Regions = []string{"nl"}
+			},
+			wantErr: "must be an uppercase two-letter region token",
+		},
+		{
+			name: "regions duplicate rejected",
+			mutate: func(e *Entry) {
+				e.Regions = []string{"NL", "NL"}
+			},
+			wantErr: `regions[1] "NL" is a duplicate`,
+		},
+		{
+			name: "api_language invalid tag rejected",
+			mutate: func(e *Entry) {
+				e.APILanguage = "not a tag"
+			},
+			wantErr: "must be a BCP 47 language tag",
+		},
+		{
 			name: "auth_env_vars empty entry",
 			mutate: func(e *Entry) {
 				e.AuthEnvVars = []string{"STRIPE_SECRET_KEY", " "}
@@ -264,8 +296,8 @@ func TestValidateEntry(t *testing.T) {
 func TestAllPublicCategoriesAreValid(t *testing.T) {
 	publicCategories := []string{
 		"ai", "auth", "cloud", "commerce", "developer-tools", "devices",
-		"food-and-dining", "maps", "marketing", "media-and-entertainment", "monitoring",
-		"payments", "productivity", "project-management", "sales-and-crm",
+		"food-and-dining", "health", "maps", "marketing", "media-and-entertainment",
+		"monitoring", "payments", "productivity", "project-management", "sales-and-crm",
 		"social-and-messaging", "travel", "other",
 	}
 	base := Entry{
@@ -533,11 +565,13 @@ func TestPublicCategoriesExcludeExample(t *testing.T) {
 	categories := PublicCategories()
 	assert.NotContains(t, categories, "example")
 	assert.Contains(t, categories, "developer-tools")
+	assert.Contains(t, categories, "health")
 	assert.Contains(t, categories, "other")
 }
 
 func TestIsPublicCategory(t *testing.T) {
 	assert.True(t, IsPublicCategory("developer-tools"))
+	assert.True(t, IsPublicCategory("health"))
 	assert.True(t, IsPublicCategory("other"))
 	assert.False(t, IsPublicCategory("example"))
 	assert.False(t, IsPublicCategory("banana"))

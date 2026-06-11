@@ -118,6 +118,22 @@ func TestBodyMap(t *testing.T) {
 				"\t}\n",
 		},
 		{
+			// Required bools without a default are string-backed so the
+			// CLI can distinguish omitted from explicit false. The body-map
+			// block must parse the string back to bool before storing so
+			// json.Marshal emits {"all_day":false}, not {"all_day":"false"}.
+			name:   "required bool without default parses string-backed flag",
+			body:   []spec.Param{{Name: "all_day", Type: "boolean", Required: true}},
+			indent: "\t\t\t",
+			want: "\t\t\tif bodyAllDay != \"\" {\n" +
+				"\t\t\t\tparsedAllDay, err := strconv.ParseBool(bodyAllDay)\n" +
+				"\t\t\t\tif err != nil {\n" +
+				"\t\t\t\t\treturn fmt.Errorf(\"parsing --all-day as bool: %w\", err)\n" +
+				"\t\t\t\t}\n" +
+				"\t\t\t\tbody[\"all_day\"] = parsedAllDay\n" +
+				"\t\t\t}\n",
+		},
+		{
 			name:   "empty body produces empty string",
 			body:   nil,
 			indent: "\t\t\t",
@@ -164,6 +180,20 @@ func TestBodyMap_IdentName(t *testing.T) {
 	}
 	if !strings.Contains(got, `body["start"]`) {
 		t.Errorf("expected wire key to use Name (not IdentName), got: %s", got)
+	}
+}
+
+func TestBodyMap_BodyNameOverridesJSONKey(t *testing.T) {
+	t.Parallel()
+	got := bodyMap([]spec.Param{{Name: "startAfter", BodyName: "searchAfter", Type: "array"}}, "\t")
+	if !strings.Contains(got, "bodyStartAfter") {
+		t.Errorf("expected public name to drive variable identity, got: %s", got)
+	}
+	if !strings.Contains(got, `body["searchAfter"] = parsedStartAfter`) {
+		t.Errorf("expected body_name to drive JSON key, got: %s", got)
+	}
+	if strings.Contains(got, `body["startAfter"]`) {
+		t.Errorf("public name must not leak as JSON key when body_name is set, got: %s", got)
 	}
 }
 
@@ -569,6 +599,43 @@ func TestBodyJSONFallback_BodyMap_TypedPath(t *testing.T) {
 	}
 	if !strings.Contains(got, `body["name"] = bodyName`) {
 		t.Errorf("expected typed body-map output for name field, got:\n%s", got)
+	}
+}
+
+func TestBodyHasStringBackedBool(t *testing.T) {
+	t.Parallel()
+	endpoint := spec.Endpoint{Body: []spec.Param{{
+		Name: "settings",
+		Type: "object",
+		Fields: []spec.Param{
+			{Name: "all_day", Type: "bool", Required: true},
+		},
+	}}}
+	if !bodyHasStringBackedBool(endpoint) {
+		t.Fatal("expected nested required bool without default to require strconv import")
+	}
+	endpoint.BodyJSONFallback = true
+	if bodyHasStringBackedBool(endpoint) {
+		t.Fatal("body-json fallback bypasses typed bool parsing and must not require strconv")
+	}
+}
+
+func TestNonJSONBodyMaps_RequiredBoolNoDefaultUsesStringZero(t *testing.T) {
+	t.Parallel()
+	body := []spec.Param{{Name: "all_day", Type: "boolean", Required: true}}
+	multipart := multipartBodyMaps(body, "\t")
+	if !strings.Contains(multipart, `if bodyAllDay != "" {`) {
+		t.Errorf("multipart required bool must compare against string zero value, got:\n%s", multipart)
+	}
+	if strings.Contains(multipart, `bodyAllDay != false`) {
+		t.Errorf("multipart required bool must not compare string var to bool false, got:\n%s", multipart)
+	}
+	form := formBodyMaps(body, "\t")
+	if !strings.Contains(form, `if bodyAllDay != "" {`) {
+		t.Errorf("form required bool must compare against string zero value, got:\n%s", form)
+	}
+	if strings.Contains(form, `bodyAllDay != false`) {
+		t.Errorf("form required bool must not compare string var to bool false, got:\n%s", form)
 	}
 }
 

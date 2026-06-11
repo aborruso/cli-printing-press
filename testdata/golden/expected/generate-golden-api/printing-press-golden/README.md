@@ -2,7 +2,7 @@
 
 Purpose-built fixture for golden generation coverage.
 
-Printed by [@printing-press-golden](https://github.com/printing-press-golden) (printing-press-golden).
+Created by [@printing-press-golden](https://github.com/printing-press-golden) (printing-press-golden).
 
 ## Install
 
@@ -42,6 +42,14 @@ Download a pre-built binary for your platform from the [latest release](https://
 <!-- pp-hermes-install-anchor -->
 ## Install for Hermes
 
+Install the CLI binary first. The installer writes binaries to a per-user managed bin directory by default: `$HOME/.local/bin` on macOS/Linux and `%LOCALAPPDATA%\Programs\PrintingPress\bin` on Windows.
+
+```bash
+npx -y @mvanhorn/printing-press-library install printing-press-golden --cli-only
+```
+
+Then install the focused Hermes skill.
+
 From the Hermes CLI:
 
 ```bash
@@ -54,13 +62,16 @@ Inside a Hermes chat session:
 /skills install mvanhorn/printing-press-library/cli-skills/pp-printing-press-golden --force
 ```
 
+Restart the Hermes session or gateway if the newly installed skill is not visible immediately.
+
 ## Install for OpenClaw
+Install both the CLI binary and the focused OpenClaw skill. The installer defaults binaries to a per-user bin directory (`$HOME/.local/bin` on macOS/Linux, `%LOCALAPPDATA%\Programs\PrintingPress\bin` on Windows):
 
-Tell your OpenClaw agent (copy this):
+```bash
+npx -y @mvanhorn/printing-press-library install printing-press-golden --agent openclaw
+```
 
-```
-Install the pp-printing-press-golden skill from https://github.com/mvanhorn/printing-press-library/tree/main/cli-skills/pp-printing-press-golden. The skill defines how its required CLI can be installed.
-```
+Restart the OpenClaw session or gateway if the newly installed skill is not visible immediately.
 
 ## Use with Claude Desktop
 
@@ -196,6 +207,24 @@ This CLI is designed for AI agent consumption:
 
 Exit codes: `0` success, `2` usage error, `3` not found, `4` auth error, `5` API error, `7` rate limited, `10` config error.
 
+## Freshness
+
+This CLI owns bounded freshness for registered store-backed read command paths. In `--data-source auto` mode, covered commands check the local SQLite store before serving results; stale or missing resources trigger a bounded refresh, and refresh failures fall back to the existing local data with a warning. `--data-source local` never refreshes, and `--data-source live` reads the API without mutating the local store.
+
+Set `PRINTING_PRESS_GOLDEN_NO_AUTO_REFRESH=1` to disable the pre-read freshness hook while preserving the selected data source.
+
+Covered command paths:
+- `printing-press-golden-pp-cli currencies`
+- `printing-press-golden-pp-cli currencies get`
+- `printing-press-golden-pp-cli currencies list`
+- `printing-press-golden-pp-cli currencies search`
+- `printing-press-golden-pp-cli projects`
+- `printing-press-golden-pp-cli projects get`
+- `printing-press-golden-pp-cli projects list`
+- `printing-press-golden-pp-cli projects search`
+
+JSON outputs that use the generated provenance envelope include freshness metadata at `meta.freshness`. This metadata describes the freshness decision for the covered command path; it does not claim full historical backfill or API-specific enrichment.
+
 ## Health Check
 
 ```bash
@@ -215,6 +244,10 @@ Environment variables:
 | Name | Kind | Required | Description |
 | --- | --- | --- | --- |
 | `PRINTING_PRESS_GOLDEN_API_KEY` | per_call | Yes | Set to your API credential. |
+
+### agentcookie (optional)
+
+If you use agentcookie to sync secrets across machines, this CLI auto-adopts agentcookie-managed credentials with no extra setup. When the daemon writes to this CLI's config, `printing-press-golden-pp-cli doctor` reports `agentcookie: detected` and `auth-status` labels the source as `agentcookie`. Skip this section if you don't use agentcookie - the CLI works the same as any other.
 
 ## Troubleshooting
 **Authentication errors (exit code 4)**

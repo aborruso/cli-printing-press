@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -32,6 +33,8 @@ func TestWriteCLIManifest(t *testing.T) {
 		RunID:                "20260328T150405Z-abcd1234",
 		CatalogEntry:         "notion",
 		Category:             "productivity",
+		Regions:              []string{"NL"},
+		APILanguage:          "nl",
 		Description:          "Notion workspace API",
 	}
 
@@ -55,8 +58,51 @@ func TestWriteCLIManifest(t *testing.T) {
 	assert.Equal(t, "20260328T150405Z-abcd1234", got.RunID)
 	assert.Equal(t, "notion", got.CatalogEntry)
 	assert.Equal(t, "productivity", got.Category)
+	assert.Equal(t, []string{"NL"}, got.Regions)
+	assert.Equal(t, "nl", got.APILanguage)
 	assert.Equal(t, "Notion workspace API", got.Description)
 	assert.Equal(t, m.GeneratedAt, got.GeneratedAt)
+
+	releaseData, err := os.ReadFile(filepath.Join(dir, CLIReleaseManifestFilename))
+	require.NoError(t, err)
+	var release CLIReleaseManifest
+	require.NoError(t, json.Unmarshal(releaseData, &release))
+	assert.Equal(t, 1, release.SchemaVersion)
+	assert.Equal(t, "notion", release.Slug)
+	assert.Equal(t, "notion-pp-cli", release.CLIName)
+	assert.Equal(t, "", release.Version)
+	assert.Equal(t, "", release.ReleasedAt)
+	assert.Equal(t, "", release.SourceCommit)
+	assert.Equal(t, "0.4.0", release.PrintingPressVersion)
+	assert.Equal(t, "20260328T150405Z-abcd1234", release.RunID)
+	assert.NotContains(t, string(releaseData), `"changes"`)
+
+	changelog, err := os.ReadFile(filepath.Join(dir, CLIChangelogFilename))
+	require.NoError(t, err)
+	assert.Contains(t, string(changelog), "printing-press-library release automation")
+}
+
+func TestWriteCLIManifestPreservesExistingReleaseLedger(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, CLIReleaseManifestFilename), []byte(`{"schema_version":1,"version":"2026.6.2"}`+"\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, CLIChangelogFilename), []byte("# Changelog\n\n## 2026.6.2 - 2026-06-08\n\n- Existing history.\n"), 0o644))
+
+	err := WriteCLIManifest(dir, CLIManifest{
+		SchemaVersion:        1,
+		PrintingPressVersion: "4.23.1",
+		APIName:              "notion",
+		CLIName:              "notion-pp-cli",
+		RunID:                "20260608-000000",
+	})
+	require.NoError(t, err)
+
+	releaseData, err := os.ReadFile(filepath.Join(dir, CLIReleaseManifestFilename))
+	require.NoError(t, err)
+	assert.Contains(t, string(releaseData), `"version":"2026.6.2"`)
+
+	changelog, err := os.ReadFile(filepath.Join(dir, CLIChangelogFilename))
+	require.NoError(t, err)
+	assert.Contains(t, string(changelog), "Existing history")
 }
 
 func TestWriteCLIManifestSchemaVersionAlwaysOne(t *testing.T) {
@@ -72,6 +118,34 @@ func TestWriteCLIManifestSchemaVersionAlwaysOne(t *testing.T) {
 	var got CLIManifest
 	require.NoError(t, json.Unmarshal(data, &got))
 	assert.Equal(t, 1, got.SchemaVersion)
+}
+
+func TestSanitizeManifestSpecPath(t *testing.T) {
+	assert.Equal(t, "openapi.json", sanitizeManifestSpecPath("/Users/someone/Downloads/openapi.json"))
+	assert.Equal(t, "https://example.com/openapi.yaml", sanitizeManifestSpecPath("https://example.com/openapi.yaml"))
+	assert.Equal(t, "openapi.json", sanitizeManifestSpecPath("openapi.json"))
+	// file:// URLs embed the local path, so they are basenamed too.
+	assert.Equal(t, "openapi.json", sanitizeManifestSpecPath("file:///Users/someone/Downloads/openapi.json"))
+}
+
+func TestCLIManifestIsLocalDatastore(t *testing.T) {
+	tests := []struct {
+		name string
+		m    CLIManifest
+		want bool
+	}{
+		{name: "sqlite spec format", m: CLIManifest{SpecFormat: "sqlite"}, want: true},
+		{name: "local spec format without sqlite is not enough", m: CLIManifest{SpecFormat: "local"}, want: false},
+		{name: "local sqlite spec source", m: CLIManifest{SpecSource: "local-sqlite"}, want: true},
+		{name: "openapi spec format", m: CLIManifest{SpecFormat: "openapi3"}, want: false},
+		{name: "remote sqlite wording is not local", m: CLIManifest{SpecSource: "remote-sqlite"}, want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, tt.m.IsLocalDatastore())
+		})
+	}
 }
 
 func TestWriteCLIManifestOmitsEmptyOptionalFields(t *testing.T) {
@@ -108,6 +182,12 @@ func TestWriteCLIManifestOmitsEmptyOptionalFields(t *testing.T) {
 
 	_, hasDescription := raw["description"]
 	assert.False(t, hasDescription, "description should be omitted when empty")
+
+	_, hasRegions := raw["regions"]
+	assert.False(t, hasRegions, "regions should be omitted when empty")
+
+	_, hasAPILanguage := raw["api_language"]
+	assert.False(t, hasAPILanguage, "api_language should be omitted when empty")
 }
 
 func TestWriteCLIManifestNonexistentDir(t *testing.T) {
@@ -115,37 +195,50 @@ func TestWriteCLIManifestNonexistentDir(t *testing.T) {
 	assert.Error(t, err)
 }
 
-func TestWritePatchesIndex(t *testing.T) {
+func TestEnsurePatchesDir(t *testing.T) {
 	dir := t.TempDir()
 
-	err := WritePatchesIndex(dir, "20260517-091036", "4.8.0")
+	err := EnsurePatchesDir(dir)
 	require.NoError(t, err)
 
-	data, err := os.ReadFile(filepath.Join(dir, PatchesIndexFilename))
+	// Fresh print ships the empty per-patch directory kept by a .gitkeep, and
+	// must NOT leave behind the legacy single-array file.
+	info, err := os.Stat(filepath.Join(dir, PatchesDirName))
 	require.NoError(t, err)
+	assert.True(t, info.IsDir(), "%s should be a directory", PatchesDirName)
 
-	var idx PatchesIndex
-	require.NoError(t, json.Unmarshal(data, &idx))
+	_, err = os.Stat(filepath.Join(dir, PatchesDirName, PatchesGitKeepName))
+	assert.NoError(t, err, ".gitkeep should keep the empty dir tracked")
 
-	assert.Equal(t, 1, idx.SchemaVersion)
-	assert.Equal(t, "20260517-091036", idx.BaseRunID)
-	assert.Equal(t, "4.8.0", idx.BasePrintingPressVersion)
-	assert.NotNil(t, idx.Patches, "Patches should be non-nil (empty slice) so JSON serializes as [] not null")
-	assert.Empty(t, idx.Patches)
-	assert.Regexp(t, `^\d{4}-\d{2}-\d{2}$`, idx.AppliedAt, "applied_at should be YYYY-MM-DD")
-
-	// Verify the raw JSON serializes patches as [], not null — empty
-	// arrays are what the library verifier expects, and []json.RawMessage{}
-	// is what produces that shape (vs nil → null).
-	assert.Contains(t, string(data), `"patches": []`)
+	_, err = os.Stat(filepath.Join(dir, PatchesIndexFilename))
+	assert.True(t, os.IsNotExist(err), "legacy single-array file must not be emitted")
 }
 
-func TestWritePatchesIndexPreservesExisting(t *testing.T) {
+func TestEnsurePatchesDirPreservesExistingDir(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, PatchesIndexFilename)
+	patchesDir := filepath.Join(dir, PatchesDirName)
+	require.NoError(t, os.Mkdir(patchesDir, 0o755))
 
-	// Pre-create a populated index (simulating an agent that already
-	// applied an in-session patch to the generated CLI).
+	// Pre-place an agent-authored patch file.
+	patch := []byte(`{"schema_version": 2, "id": "test-patch", "summary": "preserved across regen"}` + "\n")
+	patchPath := filepath.Join(patchesDir, "test-patch.json")
+	require.NoError(t, os.WriteFile(patchPath, patch, 0o644))
+
+	// Regen must not clobber it (no .gitkeep churn either).
+	require.NoError(t, EnsurePatchesDir(dir))
+
+	got, err := os.ReadFile(patchPath)
+	require.NoError(t, err)
+	assert.Equal(t, patch, got, "existing patch file must be preserved byte-for-byte on regen")
+}
+
+func TestEnsurePatchesDirPreservesLegacyFile(t *testing.T) {
+	dir := t.TempDir()
+	legacyPath := filepath.Join(dir, PatchesIndexFilename)
+
+	// A CLI that still ships the legacy single-array file (older Press, or one
+	// not yet normalized) must be left untouched — the public library converts
+	// it post-merge, not the generator.
 	preExisting := []byte(`{
   "schema_version": 1,
   "applied_at": "2026-01-15",
@@ -156,19 +249,19 @@ func TestWritePatchesIndexPreservesExisting(t *testing.T) {
   ]
 }
 `)
-	require.NoError(t, os.WriteFile(path, preExisting, 0o644))
+	require.NoError(t, os.WriteFile(legacyPath, preExisting, 0o644))
 
-	// Call WritePatchesIndex with different values — must NOT overwrite.
-	err := WritePatchesIndex(dir, "20260517-091036", "4.8.0")
-	require.NoError(t, err)
+	require.NoError(t, EnsurePatchesDir(dir))
 
-	got, err := os.ReadFile(path)
+	got, err := os.ReadFile(legacyPath)
 	require.NoError(t, err)
-	assert.Equal(t, preExisting, got, "existing patches index must be preserved byte-for-byte on regen")
+	assert.Equal(t, preExisting, got, "existing legacy patches file must be preserved byte-for-byte on regen")
+	_, err = os.Stat(filepath.Join(dir, PatchesDirName))
+	assert.True(t, os.IsNotExist(err), "must not create the directory alongside a preserved legacy file")
 }
 
-func TestWritePatchesIndexNonexistentDir(t *testing.T) {
-	err := WritePatchesIndex("/nonexistent/path/that/does/not/exist", "run", "version")
+func TestEnsurePatchesDirNonexistentDir(t *testing.T) {
+	err := EnsurePatchesDir("/nonexistent/path/that/does/not/exist")
 	assert.Error(t, err)
 }
 
@@ -187,22 +280,20 @@ func TestWriteManifestForGenerateEmitsPatchesIndex(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// Both manifest siblings must land. (MCPB manifest.json is conditional
-	// on populated MCP metadata, which this minimal test doesn't trigger;
-	// the existing TestWriteManifestForGenerateWithSpecURL siblings cover
-	// MCPB-emit cases.)
-	for _, fname := range []string{CLIManifestFilename, PatchesIndexFilename} {
-		_, err := os.Stat(filepath.Join(dir, fname))
-		assert.NoError(t, err, "expected %s to exist after WriteManifestForGenerate", fname)
-	}
-
-	// Patches index has the right shape and the run-ID flows through.
-	data, err := os.ReadFile(filepath.Join(dir, PatchesIndexFilename))
-	require.NoError(t, err)
-	var idx PatchesIndex
-	require.NoError(t, json.Unmarshal(data, &idx))
-	assert.Equal(t, "20260517-091036", idx.BaseRunID)
-	assert.Equal(t, version.Version, idx.BasePrintingPressVersion)
+	// The CLI manifest and the per-patch directory (kept by .gitkeep) must land.
+	// (MCPB manifest.json is conditional on populated MCP metadata, which this
+	// minimal test doesn't trigger; the existing TestWriteManifestForGenerateWithSpecURL
+	// siblings cover MCPB-emit cases.)
+	_, err = os.Stat(filepath.Join(dir, CLIManifestFilename))
+	assert.NoError(t, err, "expected %s to exist after WriteManifestForGenerate", CLIManifestFilename)
+	_, err = os.Stat(filepath.Join(dir, CLIReleaseManifestFilename))
+	assert.NoError(t, err, "expected %s to exist after WriteManifestForGenerate", CLIReleaseManifestFilename)
+	_, err = os.Stat(filepath.Join(dir, CLIChangelogFilename))
+	assert.NoError(t, err, "expected %s to exist after WriteManifestForGenerate", CLIChangelogFilename)
+	_, err = os.Stat(filepath.Join(dir, PatchesDirName, PatchesGitKeepName))
+	assert.NoError(t, err, "expected %s/%s to exist after WriteManifestForGenerate", PatchesDirName, PatchesGitKeepName)
+	_, err = os.Stat(filepath.Join(dir, PatchesIndexFilename))
+	assert.True(t, os.IsNotExist(err), "fresh print must not emit the legacy single-array file")
 }
 
 func TestWriteManifestForGeneratePreservesPatchesIndexOnRegen(t *testing.T) {
@@ -210,29 +301,29 @@ func TestWriteManifestForGeneratePreservesPatchesIndexOnRegen(t *testing.T) {
 	specContent := []byte(`{"openapi": "3.0.0", "info": {"title": "Test"}}`)
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "spec.json"), specContent, 0o644))
 
-	// First generate.
+	// First generate, then drop an agent-authored patch file into the dir.
 	require.NoError(t, WriteManifestForGenerate(GenerateManifestParams{
 		APIName:   "test-api",
 		SpecSrcs:  []string{"https://example.com/openapi.json"},
 		OutputDir: dir,
 		RunID:     "20260517-091036",
 	}))
-	patchesPath := filepath.Join(dir, PatchesIndexFilename)
-	firstContent, err := os.ReadFile(patchesPath)
-	require.NoError(t, err)
+	patchPath := filepath.Join(dir, PatchesDirName, "test-patch.json")
+	patch := []byte(`{"schema_version": 2, "id": "test-patch", "summary": "survives regen"}` + "\n")
+	require.NoError(t, os.WriteFile(patchPath, patch, 0o644))
 
-	// Second generate (simulates `generate --force` regen) with different
-	// run-ID — patches index must be preserved byte-for-byte.
+	// Second generate (simulates `generate --force` regen) with a different
+	// run-ID — the agent-authored patch file must be preserved byte-for-byte.
 	require.NoError(t, WriteManifestForGenerate(GenerateManifestParams{
 		APIName:   "test-api",
 		SpecSrcs:  []string{"https://example.com/openapi.json"},
 		OutputDir: dir,
 		RunID:     "20260601-120000",
 	}))
-	secondContent, err := os.ReadFile(patchesPath)
+	secondContent, err := os.ReadFile(patchPath)
 	require.NoError(t, err)
 
-	assert.Equal(t, firstContent, secondContent, "patches index must survive regen unchanged")
+	assert.Equal(t, patch, secondContent, "agent-authored patch file must survive regen unchanged")
 }
 
 func TestSyncCLIManifestNovelFeaturesPreservesManifestContract(t *testing.T) {
@@ -367,7 +458,7 @@ func TestPublishWorkingCLIWritesManifest(t *testing.T) {
 	assert.Equal(t, "test-api-pp-cli", got.CLIName)
 	assert.Equal(t, version.Version, got.PrintingPressVersion)
 	assert.Equal(t, "https://example.com/spec.json", got.SpecURL)
-	assert.Equal(t, "/tmp/test-spec.json", got.SpecPath)
+	assert.Equal(t, "test-spec.json", got.SpecPath)
 	assert.Equal(t, "openapi3", got.SpecFormat)
 	assert.NotEmpty(t, got.RunID)
 	assert.False(t, got.GeneratedAt.IsZero())
@@ -407,7 +498,7 @@ func TestPublishManifestNormalizesLocalPathInSpecURL(t *testing.T) {
 
 	// Local path should be in spec_path, NOT in spec_url
 	assert.Empty(t, got.SpecURL, "local file path should not appear in spec_url")
-	assert.Equal(t, "/tmp/my-spec.yaml", got.SpecPath)
+	assert.Equal(t, "my-spec.yaml", got.SpecPath)
 }
 
 func TestPublishManifestNormalizesURLDuplicatedInBothFields(t *testing.T) {
@@ -563,6 +654,7 @@ resources:
 	assert.Equal(t, 1, got.MCPPublicToolCount)
 	assert.Equal(t, "full", got.MCPReady)
 	assert.Equal(t, "bearer_token", got.AuthType)
+	assert.Empty(t, got.SpecKind)
 	assert.Equal(t, []string{"INTERNAL_SPEC_TOKEN"}, got.AuthEnvVars)
 }
 
@@ -597,6 +689,60 @@ func TestWriteManifestForGenerateWithSpecURL(t *testing.T) {
 	assert.False(t, got.GeneratedAt.IsZero())
 }
 
+func TestWriteManifestForGenerateRecordsAuthPreference(t *testing.T) {
+	dir := t.TempDir()
+
+	err := WriteManifestForGenerate(GenerateManifestParams{
+		APIName:        "multi-auth",
+		OutputDir:      dir,
+		AuthPreference: "ApiKeyAuth",
+		Spec: &spec.APISpec{
+			Name: "multi-auth",
+			Auth: spec.AuthConfig{
+				Type:   "api_key",
+				Scheme: "ApiKeyAuth",
+				In:     "header",
+				Header: "x-api-key",
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	got := readPublishedManifest(t, dir)
+	assert.Equal(t, "api_key", got.AuthType)
+	assert.Equal(t, "ApiKeyAuth", got.AuthPreference)
+}
+
+func TestWriteManifestForGenerateClearsStaleAuthPreference(t *testing.T) {
+	dir := t.TempDir()
+	writeManifest(t, dir, CLIManifest{
+		APIName:        "multi-auth",
+		CLIName:        "multi-auth-pp-cli",
+		AuthType:       "api_key",
+		AuthPreference: "ApiKeyAuth",
+	})
+
+	err := WriteManifestForGenerate(GenerateManifestParams{
+		APIName:   "multi-auth",
+		OutputDir: dir,
+		Spec: &spec.APISpec{
+			Name: "multi-auth",
+			Auth: spec.AuthConfig{Type: "none"},
+		},
+	})
+	require.NoError(t, err)
+
+	data, err := os.ReadFile(filepath.Join(dir, CLIManifestFilename))
+	require.NoError(t, err)
+	var raw map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(data, &raw))
+	assert.NotContains(t, raw, "auth_preference")
+
+	got := readPublishedManifest(t, dir)
+	assert.Equal(t, "none", got.AuthType)
+	assert.Empty(t, got.AuthPreference)
+}
+
 func TestWriteManifestForGenerateWithLocalSpec(t *testing.T) {
 	dir := t.TempDir()
 
@@ -614,7 +760,87 @@ func TestWriteManifestForGenerateWithLocalSpec(t *testing.T) {
 	require.NoError(t, json.Unmarshal(data, &got))
 
 	assert.Empty(t, got.SpecURL, "local path should not appear in spec_url")
-	assert.Equal(t, "/tmp/my-spec.yaml", got.SpecPath)
+	assert.Equal(t, "my-spec.yaml", got.SpecPath)
+}
+
+func TestWriteManifestForGenerateStampsLocalSQLiteSpecFormat(t *testing.T) {
+	dir := t.TempDir()
+	localSpec := &spec.APISpec{
+		Name:   "local-data",
+		Source: spec.SourceLocalSQLite,
+		Auth:   spec.AuthConfig{Type: "none"},
+		Resources: map[string]spec.Resource{
+			"items": {Endpoints: map[string]spec.Endpoint{"list": {Method: "GET", Path: "/items"}}},
+		},
+	}
+
+	for range 2 {
+		require.NoError(t, WriteManifestForGenerate(GenerateManifestParams{
+			APIName:   "local-data",
+			SpecSrcs:  []string{"/tmp/local-data.yaml"},
+			OutputDir: dir,
+			Spec:      localSpec,
+		}))
+	}
+
+	data, err := os.ReadFile(filepath.Join(dir, CLIManifestFilename))
+	require.NoError(t, err)
+
+	var got CLIManifest
+	require.NoError(t, json.Unmarshal(data, &got))
+	assert.Equal(t, spec.SourceLocalSQLite, got.SpecFormat)
+	assert.True(t, got.IsLocalDatastore())
+	assert.Equal(t, "local-data.yaml", got.SpecPath)
+}
+
+func TestWriteManifestForGenerateStampsSyntheticSpecKind(t *testing.T) {
+	dir := t.TempDir()
+	syntheticSpec := &spec.APISpec{
+		Name: "aws-billing",
+		Kind: spec.KindSynthetic,
+		Auth: spec.AuthConfig{Type: "none"},
+		Resources: map[string]spec.Resource{
+			"costs": {Endpoints: map[string]spec.Endpoint{"list": {Method: "GET", Path: "/costs"}}},
+		},
+	}
+
+	require.NoError(t, WriteManifestForGenerate(GenerateManifestParams{
+		APIName:   "aws-billing",
+		OutputDir: dir,
+		Spec:      syntheticSpec,
+	}))
+
+	data, err := os.ReadFile(filepath.Join(dir, CLIManifestFilename))
+	require.NoError(t, err)
+
+	var got CLIManifest
+	require.NoError(t, json.Unmarshal(data, &got))
+	assert.Equal(t, spec.KindSynthetic, got.SpecKind)
+	assert.True(t, got.IsSyntheticSpec())
+}
+
+func TestWriteManifestForGenerateMCPBManifestUsesResolvedMCPBinarySlug(t *testing.T) {
+	dir := t.TempDir()
+
+	err := WriteManifestForGenerate(GenerateManifestParams{
+		APIName:   "foo-bar",
+		OutputDir: dir,
+		Spec: &spec.APISpec{
+			Name:        "foo.bar",
+			Description: "Foo.Bar API",
+			Auth:        spec.AuthConfig{Type: "none"},
+		},
+	})
+	require.NoError(t, err)
+
+	got := readMCPBManifest(t, dir)
+	assert.Equal(t, "foo-bar-pp-mcp", got.Name)
+	assert.Equal(t, "bin/foo-bar-pp-mcp", got.Server.EntryPoint)
+	assert.Equal(t, "${__dirname}/bin/foo-bar-pp-mcp", got.Server.MCPConfig.Command)
+
+	data, err := os.ReadFile(filepath.Join(dir, MCPBManifestFilename))
+	require.NoError(t, err)
+	assert.NotContains(t, string(data), "foo.bar")
 }
 
 func TestWriteManifestForGenerateKeepsCatalogDisplayNameOverTitleFallback(t *testing.T) {
@@ -762,12 +988,13 @@ func TestDeriveRunIDFromResearchDir(t *testing.T) {
 		expected string
 	}{
 		{"canonical run_id basename", "/tmp/runs/20260504-190931", "20260504-190931"},
+		{"skill-allocated suffixed basename", "/tmp/runs/20260504-190931-a1b2c3d4", "20260504-190931-a1b2c3d4"},
 		{"trailing slash", "/tmp/runs/20260504-190931/", "20260504-190931"},
 		{"basename only", "20260101-000000", "20260101-000000"},
 		{"empty input", "", ""},
 		{"non-matching basename", "/tmp/runs/research", ""},
 		{"partial match (date only)", "/tmp/runs/20260504", ""},
-		{"longer suffix", "/tmp/runs/20260504-190931-x", ""},
+		{"legacy basename with suffix", "/tmp/runs/20260504-190931-x", "20260504-190931-x"},
 		{"wrong shape (T separator)", "/tmp/runs/20260504T190931", ""},
 	}
 	for _, tc := range cases {
@@ -775,6 +1002,32 @@ func TestDeriveRunIDFromResearchDir(t *testing.T) {
 			assert.Equal(t, tc.expected, DeriveRunIDFromResearchDir(tc.input))
 		})
 	}
+}
+
+func TestResolveRunIDFromResearchDir(t *testing.T) {
+	t.Parallel()
+
+	t.Run("state json wins over basename", func(t *testing.T) {
+		t.Parallel()
+		dir := filepath.Join(t.TempDir(), "20260504-190931")
+		require.NoError(t, os.MkdirAll(dir, 0o755))
+		require.NoError(t, os.WriteFile(
+			filepath.Join(dir, "state.json"),
+			[]byte(`{"api_name":"canvas","run_id":"20260606-102750-a1b2c3d4"}`),
+			0o644,
+		))
+		assert.Equal(t, "20260606-102750-a1b2c3d4", ResolveRunIDFromResearchDir(dir))
+	})
+
+	t.Run("falls back to legacy basename", func(t *testing.T) {
+		t.Parallel()
+		assert.Equal(t, "20260504-190931", ResolveRunIDFromResearchDir("/tmp/runs/20260504-190931"))
+	})
+
+	t.Run("empty string when state and basename are not usable", func(t *testing.T) {
+		t.Parallel()
+		assert.Equal(t, "", ResolveRunIDFromResearchDir(t.TempDir()))
+	})
 }
 
 func TestLoadAPINameFromResearchDir(t *testing.T) {
@@ -846,6 +1099,12 @@ func TestArchiveRunArtifactsCopiesDiscovery(t *testing.T) {
 	require.NoError(t, os.MkdirAll(state.DiscoveryDir(), 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(state.DiscoveryDir(), "browser-sniff-report.md"), []byte("report"), 0o644))
 	require.NoError(t, os.WriteFile(filepath.Join(state.DiscoveryDir(), "browser-sniff-unique-paths.txt"), []byte("/api/v1\n/api/v2"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(state.DiscoveryDir(), "browser-sniff-capture.har"), []byte(`{"request":{"headers":[{"name":"Cookie","value":"session=secret"}]}}`), 0o644))
+	largeCapture := filepath.Join(state.DiscoveryDir(), "browser-sniff-capture.json")
+	largeFile, err := os.Create(largeCapture)
+	require.NoError(t, err)
+	require.NoError(t, largeFile.Truncate(101*1024*1024))
+	require.NoError(t, largeFile.Close())
 
 	archiveDir, err := ArchiveRunArtifacts(state)
 	require.NoError(t, err)
@@ -860,6 +1119,8 @@ func TestArchiveRunArtifactsCopiesDiscovery(t *testing.T) {
 	paths, err := os.ReadFile(filepath.Join(archivedDiscovery, "browser-sniff-unique-paths.txt"))
 	require.NoError(t, err)
 	assert.Equal(t, "/api/v1\n/api/v2", string(paths))
+	assert.NoFileExists(t, filepath.Join(archivedDiscovery, "browser-sniff-capture.har"))
+	assert.NoFileExists(t, filepath.Join(archivedDiscovery, "browser-sniff-capture.json"))
 
 	// Verify research/ was also copied
 	assert.DirExists(t, ArchivedResearchDir(state.APIName, state.RunID))
@@ -912,6 +1173,7 @@ func TestComputeMCPReady(t *testing.T) {
 		{"api_key", "api_key", "full"},
 		{"bearer_token", "bearer_token", "full"},
 		{"oauth2 defaults to full", "oauth2", "full"},
+		{"oauth2_refresh defaults to full", "oauth2_refresh", "full"},
 		{"cookie always partial", "cookie", "partial"},
 		{"composed always partial", "composed", "partial"},
 		{"empty auth type", "", "full"},
@@ -959,6 +1221,21 @@ func TestWriteMCPBManifest(t *testing.T) {
 		require.NoError(t, WriteMCPBManifest(dir))
 		_, statErr := os.Stat(filepath.Join(dir, MCPBManifestFilename))
 		assert.True(t, os.IsNotExist(statErr))
+	})
+
+	t.Run("uses generate-time placeholder instead of printing press version", func(t *testing.T) {
+		dir := t.TempDir()
+		writeManifest(t, dir, CLIManifest{
+			APIName:              "demo",
+			MCPBinary:            "demo-pp-mcp",
+			MCPReady:             "full",
+			PrintingPressVersion: "4.11.0",
+		})
+
+		require.NoError(t, WriteMCPBManifest(dir))
+		got := readMCPBManifest(t, dir)
+
+		assert.Equal(t, "0.0.0", got.Version)
 	})
 
 	t.Run("api_key auth emits required user_config fields", func(t *testing.T) {
@@ -1098,7 +1375,7 @@ func TestWriteMCPBManifest(t *testing.T) {
 		assert.Contains(t, key.Description, "https://fdc.nal.usda.gov/api-key-signup")
 	})
 
-	t.Run("rich auth user_config includes only per-call entries", func(t *testing.T) {
+	t.Run("rich auth user_config includes all declared env vars", func(t *testing.T) {
 		dir := t.TempDir()
 		writeManifest(t, dir, CLIManifest{
 			APIName:     "rich-auth",
@@ -1106,12 +1383,13 @@ func TestWriteMCPBManifest(t *testing.T) {
 			MCPBinary:   "rich-auth-pp-mcp",
 			MCPReady:    "full",
 			AuthType:    "api_key",
+			AuthKeyURL:  "https://rich-auth.example.com/oauth",
 			AuthEnvVars: []string{"RICH_API_KEY", "RICH_CLIENT_SECRET", "RICH_SESSION"},
 			AuthEnvVarSpecs: []spec.AuthEnvVar{
 				{Name: "RICH_API_KEY", Kind: spec.AuthEnvVarKindPerCall, Required: true, Sensitive: true, Description: "Per-call API key."},
 				{Name: "RICH_OPTIONAL", Kind: spec.AuthEnvVarKindPerCall, Required: false, Sensitive: false, Description: "Optional public selector."},
 				{Name: "RICH_CLIENT_SECRET", Kind: spec.AuthEnvVarKindAuthFlowInput, Required: false, Sensitive: true, Description: "Sensitive setup secret."},
-				{Name: "RICH_SESSION", Kind: spec.AuthEnvVarKindHarvested, Required: false, Sensitive: true, Description: "Harvested browser session."},
+				{Name: "RICH_SESSION", Kind: spec.AuthEnvVarKindHarvested, Required: false, Sensitive: true},
 			},
 		})
 
@@ -1120,8 +1398,8 @@ func TestWriteMCPBManifest(t *testing.T) {
 
 		assert.Equal(t, "${user_config.rich_api_key}", got.Server.MCPConfig.Env["RICH_API_KEY"])
 		assert.Equal(t, "${user_config.rich_optional}", got.Server.MCPConfig.Env["RICH_OPTIONAL"])
-		assert.NotContains(t, got.Server.MCPConfig.Env, "RICH_CLIENT_SECRET")
-		assert.NotContains(t, got.Server.MCPConfig.Env, "RICH_SESSION")
+		assert.Equal(t, "${user_config.rich_client_secret}", got.Server.MCPConfig.Env["RICH_CLIENT_SECRET"])
+		assert.Equal(t, "${user_config.rich_session}", got.Server.MCPConfig.Env["RICH_SESSION"])
 
 		required, ok := got.UserConfig["rich_api_key"]
 		require.True(t, ok)
@@ -1133,8 +1411,19 @@ func TestWriteMCPBManifest(t *testing.T) {
 		assert.False(t, optional.Required)
 		assert.False(t, optional.Sensitive)
 		assert.Equal(t, "Optional. Optional public selector.", optional.Description)
-		assert.NotContains(t, got.UserConfig, "rich_client_secret")
-		assert.NotContains(t, got.UserConfig, "rich_session")
+
+		secret, ok := got.UserConfig["rich_client_secret"]
+		require.True(t, ok)
+		assert.False(t, secret.Required)
+		assert.True(t, secret.Sensitive)
+		assert.Equal(t, "Optional. Sensitive setup secret.", secret.Description)
+
+		session, ok := got.UserConfig["rich_session"]
+		require.True(t, ok)
+		assert.False(t, session.Required)
+		assert.True(t, session.Sensitive)
+		assert.Equal(t, "Optional. Stores RICH_SESSION after it is harvested by the auth setup flow for the Rich Auth MCP server.", session.Description)
+		assert.NotContains(t, session.Description, "Get a credential from")
 	})
 
 	t.Run("composed apiKey + bearer surfaces sibling creds in user_config and env", func(t *testing.T) {
@@ -1170,10 +1459,22 @@ func TestWriteMCPBManifest(t *testing.T) {
 
 		assert.Equal(t, "${user_config.st_app_key}", got.Server.MCPConfig.Env["ST_APP_KEY"],
 			"sibling credential must forward through the launch env block")
+		assert.Equal(t, "${user_config.st_client_id}", got.Server.MCPConfig.Env["ST_CLIENT_ID"])
+		assert.Equal(t, "${user_config.st_client_secret}", got.Server.MCPConfig.Env["ST_CLIENT_SECRET"])
 		uc, ok := got.UserConfig["st_app_key"]
 		require.True(t, ok, "user_config must prompt for the sibling apiKey credential")
 		assert.True(t, uc.Required)
 		assert.True(t, uc.Sensitive)
+		clientID, ok := got.UserConfig["st_client_id"]
+		require.True(t, ok, "auth flow inputs must surface in user_config")
+		assert.True(t, clientID.Required)
+		assert.False(t, clientID.Sensitive)
+		assert.Equal(t, "Collects ST_CLIENT_ID for the auth setup flow used by the ServiceTitan Compose MCP server.", clientID.Description)
+		clientSecret, ok := got.UserConfig["st_client_secret"]
+		require.True(t, ok, "auth flow secrets must surface in user_config")
+		assert.True(t, clientSecret.Required)
+		assert.True(t, clientSecret.Sensitive)
+		assert.Equal(t, "Collects ST_CLIENT_SECRET for the auth setup flow used by the ServiceTitan Compose MCP server.", clientSecret.Description)
 	})
 
 	t.Run("sibling header credential surfaces even when primary env vars are absent", func(t *testing.T) {
@@ -1262,6 +1563,28 @@ func TestWriteMCPBManifest(t *testing.T) {
 			v, ok := got.UserConfig[key]
 			require.True(t, ok, "user_config must include %q", key)
 			assert.False(t, v.Required, "auth_type=none keeps env vars optional")
+		}
+	})
+
+	t.Run("oauth2_refresh env vars are required", func(t *testing.T) {
+		dir := t.TempDir()
+		writeManifest(t, dir, CLIManifest{
+			APIName:     "exact-online",
+			DisplayName: "Exact Online",
+			MCPBinary:   "exact-online-pp-mcp",
+			MCPReady:    "full",
+			AuthType:    "oauth2_refresh",
+			AuthEnvVars: []string{"EXACT_ONLINE_CLIENT_ID", "EXACT_ONLINE_CLIENT_SECRET", "EXACT_ONLINE_REFRESH_TOKEN"},
+		})
+
+		require.NoError(t, WriteMCPBManifest(dir))
+		got := readMCPBManifest(t, dir)
+
+		assert.Len(t, got.UserConfig, 3)
+		for _, key := range []string{"exact_online_client_id", "exact_online_client_secret", "exact_online_refresh_token"} {
+			v, ok := got.UserConfig[key]
+			require.True(t, ok, "user_config must include %q", key)
+			assert.True(t, v.Required, "oauth2_refresh credentials gate API calls")
 		}
 	})
 
@@ -1592,6 +1915,50 @@ func TestPopulateMCPMetadata(t *testing.T) {
 	assert.Equal(t, "Use this test credential.", m.AuthDescription)
 }
 
+func TestPopulateMCPMetadataDoesNotMutateLargeMCPSurfaceDefault(t *testing.T) {
+	parsed := &spec.APISpec{
+		Name:      "test",
+		Auth:      spec.AuthConfig{Type: "none"},
+		Resources: map[string]spec.Resource{},
+	}
+	r := spec.Resource{Endpoints: map[string]spec.Endpoint{}}
+	for i := range spec.DefaultOrchestrationThreshold + 1 {
+		name := fmt.Sprintf("get_%d", i)
+		r.Endpoints[name] = spec.Endpoint{Method: "GET", Path: fmt.Sprintf("/items/%d", i)}
+	}
+	parsed.Resources["items"] = r
+
+	var m CLIManifest
+	populateMCPMetadata(&m, parsed)
+
+	assert.Equal(t, spec.DefaultOrchestrationThreshold+1, m.MCPToolCount)
+	assert.Empty(t, parsed.MCP.Orchestration)
+	assert.Empty(t, parsed.MCP.EndpointTools)
+	assert.Empty(t, parsed.MCP.Transport)
+}
+
+func TestPopulateMCPMetadataMCPBinaryUsesAPINameWhenPresent(t *testing.T) {
+	t.Run("uses canonical api_name slug over parsed title slug", func(t *testing.T) {
+		m := CLIManifest{APIName: "youtube"}
+		populateMCPMetadata(&m, &spec.APISpec{
+			Name: "youtube-data",
+			Auth: spec.AuthConfig{Type: "none"},
+		})
+
+		assert.Equal(t, "youtube-pp-mcp", m.MCPBinary)
+	})
+
+	t.Run("falls back to parsed name when api_name missing", func(t *testing.T) {
+		var m CLIManifest
+		populateMCPMetadata(&m, &spec.APISpec{
+			Name: "youtube-data",
+			Auth: spec.AuthConfig{Type: "none"},
+		})
+
+		assert.Equal(t, "youtube-data-pp-mcp", m.MCPBinary)
+	})
+}
+
 func TestPopulateMCPMetadataIncludesTierEnvVars(t *testing.T) {
 	var m CLIManifest
 	populateMCPMetadata(&m, &spec.APISpec{
@@ -1729,6 +2096,35 @@ func TestPopulateMCPMetadataCLIDescription(t *testing.T) {
 	})
 }
 
+func TestPopulateMCPMetadataRegionLanguage(t *testing.T) {
+	t.Run("spec values populate empty manifest", func(t *testing.T) {
+		var m CLIManifest
+		populateMCPMetadata(&m, &spec.APISpec{
+			Name:        "pdok-location",
+			Regions:     []string{"NL"},
+			APILanguage: "nl",
+			Auth:        spec.AuthConfig{Type: "none"},
+		})
+
+		assert.Equal(t, []string{"NL"}, m.Regions)
+		assert.Equal(t, "nl", m.APILanguage)
+	})
+
+	t.Run("empty spec values preserve catalog-derived manifest values", func(t *testing.T) {
+		m := CLIManifest{
+			Regions:     []string{"EU"},
+			APILanguage: "en",
+		}
+		populateMCPMetadata(&m, &spec.APISpec{
+			Name: "pvgis",
+			Auth: spec.AuthConfig{Type: "none"},
+		})
+
+		assert.Equal(t, []string{"EU"}, m.Regions)
+		assert.Equal(t, "en", m.APILanguage)
+	})
+}
+
 func TestRefreshCLIManifestFromSpecPreservesDurableDescription(t *testing.T) {
 	dir := t.TempDir()
 	existing := "Curated manifest description."
@@ -1831,6 +2227,230 @@ func TestWriteManifestForGeneratePreservesExistingDurableDescription(t *testing.
 
 	got := readPublishedManifest(t, dir)
 	assert.Equal(t, existing, got.Description)
+}
+
+func TestWriteManifestForGeneratePreservesExistingManifestExtras(t *testing.T) {
+	dir := t.TempDir()
+	existingRaw := `{
+  "schema_version": 1,
+  "api_name": "synthetic-polymarket",
+  "cli_name": "synthetic-polymarket-pp-cli",
+  "run_id": "20260523-171100",
+  "owner": "original-owner",
+  "printer": "original-printer",
+  "printer_name": "Original Printer",
+  "spec_url": "https://example.com/openapi.json",
+  "api_version": "2026-05-23",
+  "category": "other",
+  "novel_features": [
+    {
+      "name": "Market scanner",
+      "command": "markets scan",
+      "description": "Finds active markets"
+    }
+  ],
+  "operator_note": "published-library override"
+}`
+	require.NoError(t, os.WriteFile(filepath.Join(dir, CLIManifestFilename), []byte(existingRaw), 0o644))
+
+	err := WriteManifestForGenerate(GenerateManifestParams{
+		APIName:   "synthetic-polymarket",
+		OutputDir: dir,
+		Spec: &spec.APISpec{
+			Name: "synthetic-polymarket",
+			Auth: spec.AuthConfig{Type: "none"},
+		},
+	})
+	require.NoError(t, err)
+
+	data, err := os.ReadFile(filepath.Join(dir, CLIManifestFilename))
+	require.NoError(t, err)
+	var raw map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(data, &raw))
+	assert.JSONEq(t, `"published-library override"`, string(raw["operator_note"]))
+
+	got := readPublishedManifest(t, dir)
+	assert.Equal(t, "20260523-171100", got.RunID)
+	assert.Equal(t, "original-owner", got.Owner)
+	assert.Equal(t, "original-printer", got.Printer)
+	assert.Equal(t, "Original Printer", got.PrinterName)
+	assert.Equal(t, "https://example.com/openapi.json", got.SpecURL)
+	assert.Equal(t, "2026-05-23", got.APIVersion)
+	assert.Equal(t, "other", got.Category)
+	require.Len(t, got.NovelFeatures, 1)
+	assert.Equal(t, "Market scanner", got.NovelFeatures[0].Name)
+}
+
+func TestWriteManifestForGenerateDoesNotPreserveCrossAPIManifestExtras(t *testing.T) {
+	dir := t.TempDir()
+	existingRaw := `{
+  "schema_version": 1,
+  "api_name": "old-api",
+  "cli_name": "old-api-pp-cli",
+  "run_id": "20260523-171100",
+  "owner": "old-owner",
+  "printer": "old-printer",
+  "category": "other",
+  "novel_features": [
+    {
+      "name": "Old scanner",
+      "command": "old scan",
+      "description": "Old feature"
+    }
+  ],
+  "operator_note": "published-library override"
+}`
+	require.NoError(t, os.WriteFile(filepath.Join(dir, CLIManifestFilename), []byte(existingRaw), 0o644))
+
+	err := WriteManifestForGenerate(GenerateManifestParams{
+		APIName:   "new-api",
+		OutputDir: dir,
+		Spec: &spec.APISpec{
+			Name: "new-api",
+			Auth: spec.AuthConfig{Type: "none"},
+		},
+	})
+	require.NoError(t, err)
+
+	data, err := os.ReadFile(filepath.Join(dir, CLIManifestFilename))
+	require.NoError(t, err)
+	var raw map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(data, &raw))
+	assert.NotContains(t, raw, "operator_note")
+
+	got := readPublishedManifest(t, dir)
+	assert.Equal(t, "new-api", got.APIName)
+	assert.NotEqual(t, "20260523-171100", got.RunID)
+	assert.Empty(t, got.Owner)
+	assert.Empty(t, got.Printer)
+	assert.Empty(t, got.Category)
+	assert.Empty(t, got.NovelFeatures)
+}
+
+func TestWriteManifestForGenerateDoesNotPreserveStaleSpecURLWhenFreshSourceIsPath(t *testing.T) {
+	dir := t.TempDir()
+	specPath := filepath.Join(dir, "openapi.json")
+	require.NoError(t, os.WriteFile(specPath, []byte(`{"openapi":"3.0.0","info":{"title":"Synthetic Polymarket","version":"1.0.0"},"paths":{}}`), 0o644))
+	existingRaw := `{
+  "schema_version": 1,
+  "api_name": "synthetic-polymarket",
+  "cli_name": "synthetic-polymarket-pp-cli",
+  "spec_url": "https://example.com/old-openapi.json",
+  "operator_note": "published-library override"
+}`
+	require.NoError(t, os.WriteFile(filepath.Join(dir, CLIManifestFilename), []byte(existingRaw), 0o644))
+
+	err := WriteManifestForGenerate(GenerateManifestParams{
+		APIName:   "synthetic-polymarket",
+		SpecSrcs:  []string{specPath},
+		OutputDir: dir,
+		Spec: &spec.APISpec{
+			Name: "synthetic-polymarket",
+			Auth: spec.AuthConfig{Type: "none"},
+		},
+	})
+	require.NoError(t, err)
+
+	data, err := os.ReadFile(filepath.Join(dir, CLIManifestFilename))
+	require.NoError(t, err)
+	var raw map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(data, &raw))
+	assert.NotContains(t, raw, "operator_note")
+	assert.NotContains(t, raw, "spec_url")
+
+	got := readPublishedManifest(t, dir)
+	assert.Empty(t, got.SpecURL)
+	assert.Equal(t, filepath.Base(specPath), got.SpecPath)
+}
+
+func TestWriteManifestForGenerateFreshValuesReplaceExistingManifestExtras(t *testing.T) {
+	dir := t.TempDir()
+	existingRaw := `{
+  "schema_version": 1,
+  "api_name": "synthetic-polymarket",
+  "cli_name": "synthetic-polymarket-pp-cli",
+  "category": "other",
+  "display_name": "Stale Display",
+  "owner": "stale-owner",
+  "printer": "stale-printer",
+  "printer_name": "Stale Printer",
+  "novel_features": [
+    {
+      "name": "Stale scanner",
+      "command": "stale scan",
+      "description": "Old feature"
+    }
+  ],
+  "operator_note": "published-library override"
+}`
+	require.NoError(t, os.WriteFile(filepath.Join(dir, CLIManifestFilename), []byte(existingRaw), 0o644))
+
+	err := WriteManifestForGenerate(GenerateManifestParams{
+		APIName:     "synthetic-polymarket",
+		OutputDir:   dir,
+		DisplayName: "Fresh Display",
+		Owner:       "fresh-owner",
+		Printer:     "fresh-printer",
+		PrinterName: "Fresh Printer",
+		NovelFeatures: []NovelFeatureManifest{
+			{
+				Name:        "Fresh scanner",
+				Command:     "fresh scan",
+				Description: "Fresh feature",
+			},
+		},
+		Spec: &spec.APISpec{
+			Name:     "synthetic-polymarket",
+			Category: "travel",
+			Auth:     spec.AuthConfig{Type: "none"},
+		},
+	})
+	require.NoError(t, err)
+
+	data, err := os.ReadFile(filepath.Join(dir, CLIManifestFilename))
+	require.NoError(t, err)
+	var raw map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(data, &raw))
+	assert.JSONEq(t, `"published-library override"`, string(raw["operator_note"]))
+
+	got := readPublishedManifest(t, dir)
+	assert.Equal(t, "travel", got.Category)
+	assert.Equal(t, "Fresh Display", got.DisplayName)
+	assert.Equal(t, "fresh-owner", got.Owner)
+	assert.Equal(t, "fresh-printer", got.Printer)
+	assert.Equal(t, "Fresh Printer", got.PrinterName)
+	require.Len(t, got.NovelFeatures, 1)
+	assert.Equal(t, "Fresh scanner", got.NovelFeatures[0].Name)
+}
+
+func TestWriteManifestForGenerateEmptyFreshNovelFeaturesClearExisting(t *testing.T) {
+	dir := t.TempDir()
+	writeManifest(t, dir, CLIManifest{
+		APIName:  "synthetic-polymarket",
+		CLIName:  "synthetic-polymarket-pp-cli",
+		Category: "other",
+		NovelFeatures: []NovelFeatureManifest{
+			{
+				Name:        "Stale scanner",
+				Command:     "stale scan",
+				Description: "Old feature",
+			},
+		},
+	})
+
+	err := WriteManifestForGenerate(GenerateManifestParams{
+		APIName:       "synthetic-polymarket",
+		OutputDir:     dir,
+		NovelFeatures: []NovelFeatureManifest{},
+		Spec: &spec.APISpec{
+			Name: "synthetic-polymarket",
+			Auth: spec.AuthConfig{Type: "none"},
+		},
+	})
+	require.NoError(t, err)
+
+	got := readPublishedManifest(t, dir)
+	assert.Empty(t, got.NovelFeatures)
 }
 
 func TestWriteManifestForGenerateReplacesLiteralEllipsisDescription(t *testing.T) {

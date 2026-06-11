@@ -1,12 +1,22 @@
 package regenmerge
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/printer"
+	"go/token"
+	"io"
 	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
+	"strconv"
 	"strings"
+
+	"github.com/mvanhorn/cli-printing-press/v4/internal/pipeline"
 )
 
 // regenmergeGeneratorOwnedDirs lists internal/<name>/ subtrees the generator
@@ -51,10 +61,11 @@ var regenmergeGeneratorOwnedDirs = map[string]struct{}{
 //
 // When opts.NovelOnly is true, only NOVEL and NOVEL-COLLISION verdicts are
 // preserved; TEMPLATED-WITH-ADDITIONS, TEMPLATED-BODY-DRIFT, and
-// TEMPLATED-VALUE-DRIFT files are left as fresh emitted them, and lost
-// AddCommand re-injection is skipped. The non-classified file sweep and
-// go.mod merge still run because both are spec-orthogonal — non-Go files
-// and go.mod require additions are valid preservation targets even when
+// TEMPLATED-VALUE-DRIFT files are left as fresh emitted them unless the file
+// is a generated editable hook whose whole purpose is to carry agent-authored
+// additions. Lost AddCommand re-injection is skipped. The non-classified file
+// sweep and go.mod merge still run because both are spec-orthogonal — non-Go
+// files and go.mod require additions are valid preservation targets even when
 // the fresh spec differs from the snapshot's.
 func MergeIntoFreshTree(snapshotDir, freshDir string, report *MergeReport, opts Options) error {
 	if report == nil {
@@ -78,7 +89,7 @@ func MergeIntoFreshTree(snapshotDir, freshDir string, report *MergeReport, opts 
 			}
 			fc.Applied = true
 		case VerdictTemplatedWithAdditions, VerdictTemplatedBodyDrift, VerdictTemplatedValueDrift:
-			if opts.NovelOnly {
+			if opts.NovelOnly && !preserveTemplatedDriftInNovelOnly(fc.Path) {
 				continue
 			}
 			if err := copyPreserveFile(snapshotDir, freshDir, fc.Path); err != nil {
@@ -97,19 +108,28 @@ func MergeIntoFreshTree(snapshotDir, freshDir string, report *MergeReport, opts 
 				continue
 			}
 			hostPath := filepath.Join(freshDir, lr.HostFile)
-			if err := injectAddCommands(hostPath, lr.Calls); err != nil {
+			if err := injectAddCommands(hostPath, lr.Calls, lr.EnclosingFunc); err != nil {
 				return fmt.Errorf("re-injecting AddCommand into %s: %w", lr.HostFile, err)
 			}
 			lr.Applied = true
 		}
 	}
 
+	if err := pruneFreshDeclCollisions(freshDir, report); err != nil {
+		return fmt.Errorf("pruning fresh declaration collisions: %w", err)
+	}
+
 	if report.GoMod != nil {
-		mergedBytes, err := renderMergedGoMod(snapshotDir, freshDir)
+		merged, err := renderMergedGoModWithModulePaths(snapshotDir, freshDir)
 		switch {
 		case err == nil:
-			if writeErr := writeFileAtomic(filepath.Join(freshDir, "go.mod"), mergedBytes); writeErr != nil {
+			if writeErr := writeFileAtomic(filepath.Join(freshDir, "go.mod"), merged.Bytes); writeErr != nil {
 				return fmt.Errorf("writing merged go.mod: %w", writeErr)
+			}
+			if merged.PublishedModulePath != "" && merged.FreshModulePath != "" && merged.PublishedModulePath != merged.FreshModulePath {
+				if err := pipeline.RewriteModulePathReferences(freshDir, merged.FreshModulePath, merged.PublishedModulePath); err != nil {
+					return fmt.Errorf("rewriting module path references: %w", err)
+				}
 			}
 			report.GoMod.Merged = true
 		case errors.Is(err, fs.ErrNotExist):
@@ -127,6 +147,282 @@ func MergeIntoFreshTree(snapshotDir, freshDir string, report *MergeReport, opts 
 	return nil
 }
 
+// pruneFreshDeclCollisions removes declarations from fresh-owned Go files when
+// a preserved snapshot file in the same package directory already defines the
+// same top-level name. This handles template splits such as moving `var
+// version` from root.go to version.go while root.go is preserved for real
+// hand edits.
+func pruneFreshDeclCollisions(freshDir string, report *MergeReport) error {
+	preservedByDir := map[string]declSet{}
+	freshOwnedByDir := map[string][]string{}
+	for _, fc := range report.Files {
+		if !strings.HasSuffix(fc.Path, ".go") {
+			continue
+		}
+		dir := filepath.Dir(filepath.ToSlash(fc.Path))
+		switch {
+		case fc.Applied:
+			decls, err := extractDecls(filepath.Join(freshDir, fc.Path))
+			if err != nil {
+				return err
+			}
+			if preservedByDir[dir] == nil {
+				preservedByDir[dir] = declSet{}
+			}
+			for name := range decls {
+				preservedByDir[dir].add(name)
+			}
+		case fc.Verdict == VerdictTemplatedClean || fc.Verdict == VerdictNewTemplateEmission:
+			freshOwnedByDir[dir] = append(freshOwnedByDir[dir], fc.Path)
+		}
+	}
+	for dir, preserved := range preservedByDir {
+		if len(preserved) == 0 {
+			continue
+		}
+		for _, rel := range freshOwnedByDir[dir] {
+			if err := pruneDeclsFromGoFile(filepath.Join(freshDir, rel), preserved); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func pruneDeclsFromGoFile(path string, collisions declSet) error {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, path, nil, parser.ParseComments|parser.SkipObjectResolution)
+	if err != nil {
+		return fmt.Errorf("parsing %s: %w", path, err)
+	}
+	changed := false
+	var kept []ast.Decl
+	for _, decl := range file.Decls {
+		switch d := decl.(type) {
+		case *ast.FuncDecl:
+			if _, collides := collisions[canonicalFuncName(d)]; collides {
+				changed = true
+				continue
+			}
+		case *ast.GenDecl:
+			if d.Tok == token.IMPORT {
+				kept = append(kept, decl)
+				continue
+			}
+			if d.Tok == token.CONST && constDeclHasPruneRisk(d, collisions) {
+				break
+			}
+			specs := d.Specs[:0]
+			for _, spec := range d.Specs {
+				next, specChanged := pruneCollidingSpec(spec, collisions)
+				if specChanged {
+					changed = true
+				}
+				if next == nil {
+					continue
+				}
+				specs = append(specs, next)
+			}
+			if len(specs) == 0 {
+				continue
+			}
+			d.Specs = specs
+		}
+		kept = append(kept, decl)
+	}
+	if !changed {
+		return nil
+	}
+	file.Decls = kept
+	pruneUnusedImports(file)
+	var buf bytes.Buffer
+	if err := printer.Fprint(&buf, fset, file); err != nil {
+		return fmt.Errorf("printing %s: %w", path, err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return fmt.Errorf("statting %s: %w", path, err)
+	}
+	if err := writeFileAtomic(path, buf.Bytes()); err != nil {
+		return err
+	}
+	return os.Chmod(path, info.Mode().Perm())
+}
+
+func constDeclHasPruneRisk(decl *ast.GenDecl, collisions declSet) bool {
+	collides := false
+	hasImplicitValues := false
+	hasIota := false
+	for _, spec := range decl.Specs {
+		valueSpec, ok := spec.(*ast.ValueSpec)
+		if !ok {
+			continue
+		}
+		if len(valueSpec.Values) == 0 {
+			hasImplicitValues = true
+		}
+		if len(valueSpec.Values) > 0 && exprListUsesIota(valueSpec.Values) {
+			hasIota = true
+		}
+		if valueSpecCollides(valueSpec, collisions) {
+			collides = true
+		}
+	}
+	return collides && (hasImplicitValues || hasIota)
+}
+
+func exprListUsesIota(exprs []ast.Expr) bool {
+	for _, expr := range exprs {
+		found := false
+		ast.Inspect(expr, func(n ast.Node) bool {
+			if ident, ok := n.(*ast.Ident); ok && ident.Name == "iota" {
+				found = true
+				return false
+			}
+			return true
+		})
+		if found {
+			return true
+		}
+	}
+	return false
+}
+
+func valueSpecCollides(spec *ast.ValueSpec, collisions declSet) bool {
+	for _, name := range spec.Names {
+		if _, ok := collisions[name.Name]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+func pruneUnusedImports(file *ast.File) {
+	used := selectorPackageNames(file)
+	var decls []ast.Decl
+	for _, decl := range file.Decls {
+		gen, ok := decl.(*ast.GenDecl)
+		if !ok || gen.Tok != token.IMPORT {
+			decls = append(decls, decl)
+			continue
+		}
+		specs := gen.Specs[:0]
+		for _, spec := range gen.Specs {
+			importSpec, ok := spec.(*ast.ImportSpec)
+			if !ok || importIsUsed(importSpec, used) {
+				specs = append(specs, spec)
+			}
+		}
+		if len(specs) == 0 {
+			continue
+		}
+		gen.Specs = specs
+		decls = append(decls, gen)
+	}
+	file.Decls = decls
+}
+
+func selectorPackageNames(file *ast.File) map[string]struct{} {
+	used := map[string]struct{}{}
+	for _, decl := range file.Decls {
+		gen, ok := decl.(*ast.GenDecl)
+		if ok && gen.Tok == token.IMPORT {
+			continue
+		}
+		ast.Inspect(decl, func(n ast.Node) bool {
+			sel, ok := n.(*ast.SelectorExpr)
+			if !ok {
+				return true
+			}
+			if ident, ok := sel.X.(*ast.Ident); ok {
+				used[ident.Name] = struct{}{}
+			}
+			return true
+		})
+	}
+	return used
+}
+
+func importIsUsed(spec *ast.ImportSpec, used map[string]struct{}) bool {
+	name := importLocalName(spec)
+	if name == "" || name == "_" || name == "." {
+		return true
+	}
+	_, ok := used[name]
+	return ok
+}
+
+func importLocalName(spec *ast.ImportSpec) string {
+	if spec.Name != nil {
+		return spec.Name.Name
+	}
+	importPath, err := strconv.Unquote(spec.Path.Value)
+	if err != nil || importPath == "" {
+		return ""
+	}
+	return path.Base(importPath)
+}
+
+func pruneCollidingSpec(spec ast.Spec, collisions declSet) (ast.Spec, bool) {
+	switch s := spec.(type) {
+	case *ast.TypeSpec:
+		if _, ok := collisions[s.Name.Name]; ok {
+			return nil, true
+		}
+	case *ast.ValueSpec:
+		colliding := make([]bool, len(s.Names))
+		collisionCount := 0
+		for i, name := range s.Names {
+			if _, ok := collisions[name.Name]; ok {
+				colliding[i] = true
+				collisionCount++
+			}
+		}
+		switch {
+		case collisionCount == 0:
+			return spec, false
+		case collisionCount == len(s.Names):
+			return nil, true
+		case len(s.Values) != 0 && len(s.Values) != len(s.Names):
+			return spec, false
+		}
+		origNames := append([]*ast.Ident(nil), s.Names...)
+		origValues := append([]ast.Expr(nil), s.Values...)
+		names := s.Names[:0]
+		var values []ast.Expr
+		if len(origValues) > 0 {
+			values = s.Values[:0]
+		}
+		for i, name := range origNames {
+			if colliding[i] {
+				continue
+			}
+			names = append(names, name)
+			if len(origValues) > 0 {
+				values = append(values, origValues[i])
+			}
+		}
+		s.Names = names
+		if len(origValues) > 0 {
+			s.Values = values
+		}
+		return spec, true
+	}
+	return spec, false
+}
+
+func preserveTemplatedDriftInNovelOnly(rel string) bool {
+	_, ok := novelOnlyEditableHookPaths[filepath.ToSlash(rel)]
+	return ok
+}
+
+// novelOnlyEditableHookPaths lists generator-emitted files whose intended
+// purpose is to carry agent-authored edits. Add future editable hooks here
+// when they need NovelOnly regen to preserve templated drift.
+var novelOnlyEditableHookPaths = map[string]struct{}{
+	"internal/store/extras.go": {},
+}
+
 // copyPreserveFile copies snapshot/rel → fresh/rel, refusing symlinks and
 // creating parent dirs as needed.
 func copyPreserveFile(snapshotDir, freshDir, rel string) error {
@@ -140,16 +436,50 @@ func copyPreserveFile(snapshotDir, freshDir, rel string) error {
 	if info.Mode()&os.ModeSymlink != 0 {
 		return fmt.Errorf("refusing to preserve symlinked snapshot file: %s", rel)
 	}
-	data, err := os.ReadFile(src)
-	if err != nil {
-		return fmt.Errorf("reading snapshot file %s: %w", rel, err)
-	}
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 		return fmt.Errorf("creating parent for %s: %w", rel, err)
 	}
-	if err := writeFileAtomic(dst, data); err != nil {
+	if err := copyFileAtomic(src, dst, info.Mode().Perm()); err != nil {
 		return fmt.Errorf("writing preserved %s: %w", rel, err)
 	}
+	if err := os.Chmod(dst, info.Mode().Perm()); err != nil {
+		return fmt.Errorf("preserving mode for %s: %w", rel, err)
+	}
+	if err := os.Chtimes(dst, info.ModTime(), info.ModTime()); err != nil {
+		return fmt.Errorf("preserving mtime for %s: %w", rel, err)
+	}
+	return nil
+}
+
+func copyFileAtomic(src, dst string, mode os.FileMode) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return fmt.Errorf("opening source: %w", err)
+	}
+	defer func() { _ = in.Close() }()
+
+	tmp := dst + ".tmp"
+	out, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)
+	if err != nil {
+		return fmt.Errorf("creating temporary destination: %w", err)
+	}
+	removeTmp := true
+	defer func() {
+		if removeTmp {
+			_ = os.Remove(tmp)
+		}
+	}()
+	if _, err := io.Copy(out, in); err != nil {
+		_ = out.Close()
+		return fmt.Errorf("copying bytes: %w", err)
+	}
+	if err := out.Close(); err != nil {
+		return fmt.Errorf("closing temporary destination: %w", err)
+	}
+	if err := os.Rename(tmp, dst); err != nil {
+		return fmt.Errorf("replacing destination: %w", err)
+	}
+	removeTmp = false
 	return nil
 }
 
@@ -171,6 +501,9 @@ func sweepNonClassifiedFiles(snapshotDir, freshDir string) error {
 		}
 		relSlash := filepath.ToSlash(rel)
 		if d.IsDir() {
+			if isManuscriptsPath(relSlash) {
+				return nil
+			}
 			if !shouldWalkDir(d.Name()) {
 				return filepath.SkipDir
 			}
@@ -179,14 +512,11 @@ func sweepNonClassifiedFiles(snapshotDir, freshDir string) error {
 			}
 			return nil
 		}
-		if !shouldWalkDir(filepath.Base(filepath.Dir(path))) {
+		if !isManuscriptsPath(relSlash) && !shouldWalkDir(filepath.Base(filepath.Dir(path))) {
 			return nil
 		}
 		if shouldClassifyFile(relSlash) {
 			return nil
-		}
-		if d.Type()&os.ModeSymlink != 0 {
-			return fmt.Errorf("refusing to sweep symlinked snapshot file: %s", relSlash)
 		}
 		dst := filepath.Join(freshDir, rel)
 		if _, err := os.Stat(dst); err == nil {
@@ -195,18 +525,15 @@ func sweepNonClassifiedFiles(snapshotDir, freshDir string) error {
 		} else if !errors.Is(err, fs.ErrNotExist) {
 			return fmt.Errorf("statting fresh path %s: %w", relSlash, err)
 		}
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return fmt.Errorf("reading snapshot file %s: %w", relSlash, err)
-		}
-		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
-			return fmt.Errorf("creating parent for swept %s: %w", relSlash, err)
-		}
-		if err := writeFileAtomic(dst, data); err != nil {
-			return fmt.Errorf("writing swept %s: %w", relSlash, err)
+		if err := copyPreserveFile(snapshotDir, freshDir, rel); err != nil {
+			return fmt.Errorf("sweeping snapshot file %s: %w", relSlash, err)
 		}
 		return nil
 	})
+}
+
+func isManuscriptsPath(relSlash string) bool {
+	return relSlash == ".manuscripts" || strings.HasPrefix(relSlash, ".manuscripts/")
 }
 
 // isGeneratorOwnedInternalDir reports whether relSlash names a directory

@@ -2,7 +2,7 @@
 
 Purpose-built fixture for rich auth env-var model coverage.
 
-Printed by [@printing-press-golden](https://github.com/printing-press-golden) (printing-press-golden).
+Created by [@printing-press-golden](https://github.com/printing-press-golden) (printing-press-golden).
 
 ## Install
 
@@ -42,6 +42,14 @@ Download a pre-built binary for your platform from the [latest release](https://
 <!-- pp-hermes-install-anchor -->
 ## Install for Hermes
 
+Install the CLI binary first. The installer writes binaries to a per-user managed bin directory by default: `$HOME/.local/bin` on macOS/Linux and `%LOCALAPPDATA%\Programs\PrintingPress\bin` on Windows.
+
+```bash
+npx -y @mvanhorn/printing-press-library install printing-press-rich --cli-only
+```
+
+Then install the focused Hermes skill.
+
 From the Hermes CLI:
 
 ```bash
@@ -54,13 +62,16 @@ Inside a Hermes chat session:
 /skills install mvanhorn/printing-press-library/cli-skills/pp-printing-press-rich --force
 ```
 
+Restart the Hermes session or gateway if the newly installed skill is not visible immediately.
+
 ## Install for OpenClaw
+Install both the CLI binary and the focused OpenClaw skill. The installer defaults binaries to a per-user bin directory (`$HOME/.local/bin` on macOS/Linux, `%LOCALAPPDATA%\Programs\PrintingPress\bin` on Windows):
 
-Tell your OpenClaw agent (copy this):
+```bash
+npx -y @mvanhorn/printing-press-library install printing-press-rich --agent openclaw
+```
 
-```
-Install the pp-printing-press-rich skill from https://github.com/mvanhorn/printing-press-library/tree/main/cli-skills/pp-printing-press-rich. The skill defines how its required CLI can be installed.
-```
+Restart the OpenClaw session or gateway if the newly installed skill is not visible immediately.
 
 ## Use with Claude Desktop
 
@@ -200,6 +211,10 @@ Environment variables:
 | `RICH_AUTH_OPTIONAL_TOKEN` | per_call | No | Set to your API credential. |
 | `RICH_AUTH_BOT_TOKEN` | per_call | No | Set to your API credential. |
 | `RICH_AUTH_USER_TOKEN` | per_call | No | Set to your API credential. |
+
+### agentcookie (optional)
+
+If you use agentcookie to sync secrets across machines, this CLI auto-adopts agentcookie-managed credentials with no extra setup. When the daemon writes to this CLI's config, `printing-press-rich-pp-cli doctor` reports `agentcookie: detected` and `auth-status` labels the source as `agentcookie`. Skip this section if you don't use agentcookie - the CLI works the same as any other.
 
 ## Troubleshooting
 **Authentication errors (exit code 4)**

@@ -58,9 +58,9 @@ func TestGenerateSyncParamPassthrough(t *testing.T) {
 
 	// userParams flows through to the syncResource worker. The exact call
 	// site differs by template branch (HasTierRouting vs not), so assert the
-	// last arg is userParams.
-	assert.Contains(t, syncSrc, ", userParams)",
-		"syncResource and syncDependentResources must receive userParams")
+	// event-writer arg follows userParams.
+	assert.Contains(t, syncSrc, ", userParams, syncEventWriter)",
+		"syncResource must receive userParams before the event writer")
 
 	// applyTo is called in the page loop AFTER cursor/since/limit are set,
 	// so user flags win on conflict.
@@ -77,6 +77,146 @@ func TestGenerateSyncParamPassthrough(t *testing.T) {
 		"sync should validate --resource-param keys against the known resource set")
 	assert.Contains(t, syncSrc, "func knownSyncResourceNames() []string",
 		"knownSyncResourceNames helper must be emitted alongside defaultSyncResources")
+}
+
+func TestGenerateSyncConcurrencyDefaultHonorsRateClass(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name      string
+		rateClass string
+	}{
+		{name: "absent"},
+		{name: "per-second", rateClass: spec.RateClassPerSecond},
+		{name: "unlimited", rateClass: spec.RateClassUnlimited},
+		{name: "daily", rateClass: spec.RateClassDaily},
+		{name: "monthly", rateClass: spec.RateClassMonthly},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			apiSpec := minimalSpec("sync-" + tc.name)
+			apiSpec.RateClass = tc.rateClass
+			outputDir := filepath.Join(t.TempDir(), naming.CLI(apiSpec.Name))
+			require.NoError(t, New(apiSpec, outputDir).Generate())
+
+			syncGo, err := os.ReadFile(filepath.Join(outputDir, "internal", "cli", "sync.go"))
+			require.NoError(t, err)
+			syncSrc := string(syncGo)
+
+			wantDefault := apiSpec.SyncDefaultConcurrency()
+			assertSyncDefaultConcurrency(t, syncSrc, wantDefault, tc.name)
+		})
+	}
+}
+
+func TestGenerateSyncDefaultsSkipAuthTaggedResources(t *testing.T) {
+	t.Parallel()
+
+	paginated := func(path string, tags ...string) spec.Endpoint {
+		return spec.Endpoint{
+			Method:     "GET",
+			Path:       path,
+			Tags:       tags,
+			Response:   spec.ResponseDef{Type: "array"},
+			Pagination: &spec.Pagination{Type: "cursor", LimitParam: "limit", CursorParam: "after"},
+		}
+	}
+	apiSpec := minimalSpec("sync-auth")
+	apiSpec.Resources = map[string]spec.Resource{
+		"items": {
+			Description: "Items",
+			Endpoints:   map[string]spec.Endpoint{"list": paginated("/items")},
+		},
+		"oauth-token": {
+			Description: "OAuth token endpoint",
+			Endpoints:   map[string]spec.Endpoint{"list": paginated("/oauth_token", "OAuth")},
+		},
+		"oauth2-token": {
+			Description: "OAuth2 token endpoint",
+			Endpoints:   map[string]spec.Endpoint{"list": paginated("/oauth2_token", "OAuth2")},
+		},
+		"authorization-grant": {
+			Description: "Authorization grant endpoint",
+			Endpoints:   map[string]spec.Endpoint{"list": paginated("/authorization_grant", "Billing", "Authorization")},
+		},
+	}
+	outputDir := filepath.Join(t.TempDir(), naming.CLI(apiSpec.Name))
+	require.NoError(t, New(apiSpec, outputDir).Generate())
+
+	syncSrc := readGeneratedFile(t, outputDir, "internal", "cli", "sync.go")
+	defaultsStart := strings.Index(syncSrc, "func defaultSyncResources() []string")
+	knownStart := strings.Index(syncSrc, "func knownSyncResourceNames() []string")
+	require.NotEqual(t, -1, defaultsStart)
+	require.NotEqual(t, -1, knownStart)
+	defaultsBlock := syncSrc[defaultsStart:knownStart]
+	assert.Contains(t, defaultsBlock, `"items"`)
+	assert.NotContains(t, defaultsBlock, `"oauth-token"`)
+	assert.NotContains(t, defaultsBlock, `"oauth2-token"`)
+	assert.NotContains(t, defaultsBlock, `"authorization-grant"`)
+
+	knownBlock := syncSrc[knownStart:]
+	assert.Contains(t, knownBlock, `"items"`)
+	assert.Contains(t, knownBlock, `"oauth-token"`, "explicit --resources should still accept auth-tagged sync endpoints")
+	assert.Contains(t, knownBlock, `"oauth2-token"`, "explicit --resources should still accept auth-tagged sync endpoints")
+	assert.Contains(t, knownBlock, `"authorization-grant"`, "explicit --resources should still accept auth-tagged sync endpoints")
+
+	workflowSrc := readGeneratedFile(t, outputDir, "internal", "cli", "channel_workflow.go")
+	archiveIdx := strings.Index(workflowSrc, "resources := []string")
+	require.NotEqual(t, -1, archiveIdx)
+	archiveBlock := workflowSrc[archiveIdx:]
+	assert.Contains(t, archiveBlock, `"items"`)
+	assert.NotContains(t, archiveBlock, `"oauth-token"`)
+	assert.NotContains(t, archiveBlock, `"oauth2-token"`)
+	assert.NotContains(t, archiveBlock, `"authorization-grant"`)
+}
+
+func TestGenerateSyncDefaultsSkipTypedIDlessResources(t *testing.T) {
+	t.Parallel()
+
+	apiSpec := minimalSpec("sync-idless")
+	apiSpec.Types = map[string]spec.TypeDef{
+		"Technology": {
+			Fields: []spec.TypeField{
+				{Name: "title", Type: "string"},
+				{Name: "url", Type: "string"},
+			},
+		},
+	}
+	apiSpec.Resources = map[string]spec.Resource{
+		"technologies": {
+			Description: "Technologies",
+			Endpoints: map[string]spec.Endpoint{
+				"list": {
+					Method:   "GET",
+					Path:     "/technologies",
+					Response: spec.ResponseDef{Type: "array", Item: "Technology"},
+				},
+			},
+		},
+	}
+
+	outputDir := filepath.Join(t.TempDir(), naming.CLI(apiSpec.Name))
+	require.NoError(t, New(apiSpec, outputDir).Generate())
+
+	syncSrc := readGeneratedFile(t, outputDir, "internal", "cli", "sync.go")
+	defaultsStart := strings.Index(syncSrc, "func defaultSyncResources() []string")
+	knownStart := strings.Index(syncSrc, "func knownSyncResourceNames() []string")
+	require.NotEqual(t, -1, defaultsStart)
+	require.NotEqual(t, -1, knownStart)
+	defaultsBlock := syncSrc[defaultsStart:knownStart]
+	assert.NotContains(t, defaultsBlock, `"technologies"`,
+		"idless typed resources must not be selected by empty-args sync")
+
+	knownBlock := syncSrc[knownStart:]
+	assert.Contains(t, knownBlock, `"technologies"`,
+		"explicit --resources should still accept the idless list endpoint")
+	assert.Contains(t, syncSrc, "no default sync resources",
+		"sync should explain why empty-args sync is a no-op")
+	assert.Contains(t, syncSrc, `"reason":"no_bulk_list_endpoints"`,
+		"JSON sync warnings should preserve the existing structured reason")
 }
 
 // dependentResourceSpec builds a minimal spec with a parent + child
@@ -130,6 +270,12 @@ func TestGenerateSyncDependentSkipsFlatGlobalParam(t *testing.T) {
 		"dependent-resource call site must pass isDependent=true so --param is skipped on path-scoped calls")
 	assert.Contains(t, syncSrc, "userParams.applyTo(resource, params, false)",
 		"flat-list call site must pass isDependent=false so --param applies as before")
+	assert.Contains(t, syncSrc, "syncDependentResources(cmd.Context(), c, db",
+		"direct sync should route dependent-resource runs through the shared helper")
+	assert.Contains(t, syncSrc, "userParams, syncEventWriter)",
+		"direct sync should pass the selected event writer into dependent-resource sync")
+	assert.Contains(t, syncSrc, "userParams, syncEvents)",
+		"syncDependentResources should pass its event writer into each dependent-resource run")
 }
 
 // TestGenerateSyncUserParamsHelperRespectsFlatVsTrueGlobal pins the
@@ -232,6 +378,106 @@ func TestGenerateSyncDependentErrorNotSilent(t *testing.T) {
 	// failure to a specific parent.
 	assert.Contains(t, syncSrc, "syncErrorJSON(dep.Name, parentID, err)",
 		"dependent-resource non-warning error must emit a sync_error JSON event with the parent ID")
+	assert.Contains(t, syncSrc, "fmt.Fprintln(syncEvents, syncErrorJSON(dep.Name, parentID, err))",
+		"dependent-resource sync_error events should use the injected event writer")
+}
+
+// TestGeneratedSyncExtractPageItemsFallbackIgnoresUnknownScalarSiblings
+// executes the emitted fallback extractor. It pins the regression from issue
+// #2416: diagnostic scalar fields such as generated_at and request_id must not
+// cause the only object array in an envelope to be dropped.
+func TestGeneratedSyncExtractPageItemsFallbackIgnoresUnknownScalarSiblings(t *testing.T) {
+	t.Parallel()
+
+	apiSpec := minimalSpec("sync-envelope")
+	outputDir := filepath.Join(t.TempDir(), naming.CLI(apiSpec.Name))
+	gen := New(apiSpec, outputDir)
+	require.NoError(t, gen.Generate())
+
+	runtimeTest := `package cli
+
+import (
+	"encoding/json"
+	"testing"
+)
+
+func TestExtractPageItemsFallbackIgnoresUnknownScalarSiblings(t *testing.T) {
+	cases := []struct {
+		name       string
+		body       string
+		wantCount  int
+		wantOK     bool
+		wantMore   bool
+		wantCursor string
+		wantID     string
+	}{
+		{
+			name:      "unknown diagnostic scalar siblings",
+			body:      ` + "`" + `{"things":[{"id":"t-1"},{"id":"t-2"}],"generated_at":"2024-01-01T00:00:00Z","request_id":"abc-123","api_version":"v2"}` + "`" + `,
+			wantCount: 2,
+			wantOK:    true,
+			wantID:    "t-1",
+		},
+		{
+			name:       "known cursor metadata siblings",
+			body:       ` + "`" + `{"things":[{"id":"t-1"}],"cursor":"next-1","has_more":true}` + "`" + `,
+			wantCount:  1,
+			wantOK:     true,
+			wantMore:   true,
+			wantCursor: "next-1",
+			wantID:     "t-1",
+		},
+		{
+			name:      "ambiguous double object arrays",
+			body:      ` + "`" + `{"primary":[{"id":"p-1"}],"secondary":[{"id":"s-1"}],"request_id":"abc-123"}` + "`" + `,
+			wantOK:    false,
+		},
+		{
+			name:      "no object array",
+			body:      ` + "`" + `{"generated_at":"2024-01-01T00:00:00Z","request_id":"abc-123","count":2}` + "`" + `,
+			wantOK:    false,
+		},
+		{
+			name:      "known item key remains preferred",
+			body:      ` + "`" + `{"items":[{"id":"canonical"}],"alternate":[{"id":"other"}],"request_id":"abc-123"}` + "`" + `,
+			wantCount: 1,
+			wantOK:    true,
+			wantID:    "canonical",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			items, cursor, hasMore := extractPageItems(json.RawMessage(tc.body), "cursor")
+			if tc.wantOK {
+				if len(items) != tc.wantCount {
+					t.Fatalf("len(items) = %d, want %d", len(items), tc.wantCount)
+				}
+				if tc.wantID != "" {
+					var item map[string]string
+					if err := json.Unmarshal(items[0], &item); err != nil {
+						t.Fatalf("unmarshal first item: %v", err)
+					}
+					if item["id"] != tc.wantID {
+						t.Fatalf("first item id = %q, want %q", item["id"], tc.wantID)
+					}
+				}
+			} else if len(items) != 0 {
+				t.Fatalf("len(items) = %d, want 0", len(items))
+			}
+			if cursor != tc.wantCursor {
+				t.Fatalf("cursor = %q, want %q", cursor, tc.wantCursor)
+			}
+			if hasMore != tc.wantMore {
+				t.Fatalf("hasMore = %v, want %v", hasMore, tc.wantMore)
+			}
+		})
+	}
+}
+`
+	require.NoError(t, os.WriteFile(filepath.Join(outputDir, "internal", "cli", "sync_extract_page_items_test.go"), []byte(runtimeTest), 0o644))
+
+	runGoCommand(t, outputDir, "test", "./internal/cli", "-run", "TestExtractPageItemsFallbackIgnoresUnknownScalarSiblings")
 }
 
 // noBulkListSpec mirrors the Allrecipes shape (issue #1156): a resource whose
@@ -295,7 +541,7 @@ func TestGenerateSyncEmitsEmptyHintWhenNoBulkList(t *testing.T) {
 
 	// The runtime hint surfaces in both modes so JSON-driven agents and human
 	// callers both see the explanation instead of a silent total_records:0.
-	assert.Contains(t, syncSrc, "no bulk-list endpoints",
+	assert.Contains(t, syncSrc, "no default sync resources",
 		"sync should print a stderr hint when defaultSyncResources is empty")
 	assert.Contains(t, syncSrc, `"reason":"no_bulk_list_endpoints"`,
 		"sync should emit a sync_warning JSON event when defaultSyncResources is empty")

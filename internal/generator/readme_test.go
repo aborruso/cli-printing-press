@@ -165,6 +165,8 @@ func TestReadmeHandlesEmptyButPresentNarrative(t *testing.T) {
 		"empty AuthNarrative should not emit a dangling Authentication header")
 	assert.False(t, strings.Contains(content, "### API-specific"),
 		"empty Troubleshoots should not emit the API-specific subheading")
+	assert.False(t, strings.Contains(content, "## Recipes"),
+		"empty Recipes should not emit the Recipes section")
 	// Falls back to .Description since Headline is empty.
 	assert.True(t, strings.Contains(content, apiSpec.Description) ||
 		strings.Contains(content, "# Emptynarr CLI"),
@@ -296,18 +298,33 @@ func TestReadmeEmitsHermesAndOpenClawInstallSections(t *testing.T) {
 	assert.Contains(t, content, "<!-- pp-hermes-install-anchor -->",
 		"sweep-tool anchor must be present so retrofit can locate the insertion point")
 
-	// Hermes section: both forms (CLI + chat) use the full
-	// mvanhorn/printing-press-library/cli-skills path.
-	assert.Contains(t, content, "## Install for Hermes")
-	assert.Contains(t, content, "hermes skills install mvanhorn/printing-press-library/cli-skills/pp-hermes-install --force",
+	hermesStart := strings.Index(content, "## Install for Hermes")
+	require.NotEqual(t, -1, hermesStart, "README must include the Hermes install section")
+	hermesEnd := strings.Index(content[hermesStart:], "## Install for OpenClaw")
+	require.NotEqual(t, -1, hermesEnd, "Hermes section must be followed by the OpenClaw install section")
+	hermesSection := content[hermesStart : hermesStart+hermesEnd]
+
+	openClawStart := hermesStart + hermesEnd
+	openClawEnd := strings.Index(content[openClawStart:], "## Use with Claude Desktop")
+	require.NotEqual(t, -1, openClawEnd, "OpenClaw section must be followed by the Claude Desktop section")
+	openClawSection := content[openClawStart : openClawStart+openClawEnd]
+
+	// Hermes section: install the binary as well as the focused skill; both
+	// skill-install forms use the full mvanhorn/printing-press-library/cli-skills path.
+	assert.Contains(t, hermesSection, "npx -y @mvanhorn/printing-press-library install hermes-install --cli-only",
+		"Hermes section must install the CLI binary before installing the focused skill")
+	assert.NotContains(t, hermesSection, "hermes-install --cli-only --bin-dir",
+		"Hermes binary install should rely on the installer default bin directory unless explicitly overridden")
+	assert.Contains(t, hermesSection, "hermes skills install mvanhorn/printing-press-library/cli-skills/pp-hermes-install --force",
 		"Hermes CLI form must use mvanhorn/printing-press-library/cli-skills (the short mvanhorn/cli-skills form was wrong)")
-	assert.Contains(t, content, "/skills install mvanhorn/printing-press-library/cli-skills/pp-hermes-install --force",
+	assert.Contains(t, hermesSection, "/skills install mvanhorn/printing-press-library/cli-skills/pp-hermes-install --force",
 		"Hermes chat form must use mvanhorn/printing-press-library/cli-skills")
 
 	// OpenClaw section: copyable code-fenced agent instruction.
-	assert.Contains(t, content, "## Install for OpenClaw")
-	assert.Contains(t, content, "https://github.com/mvanhorn/printing-press-library/tree/main/cli-skills/pp-hermes-install",
-		"OpenClaw URL must point at the cli-skills directory")
+	assert.Contains(t, openClawSection, "npx -y @mvanhorn/printing-press-library install hermes-install --agent openclaw",
+		"OpenClaw form must install both the focused skill and binary using the installer default bin directory")
+	assert.NotContains(t, openClawSection, "--agent openclaw --bin-dir",
+		"OpenClaw form should rely on the installer default bin directory unless explicitly overridden")
 }
 
 // TestReadmeFallsBackWhenNarrativeAbsent asserts the generic description
@@ -475,6 +492,53 @@ func TestReadmeRendersNarrativeQuickStart(t *testing.T) {
 	// narrative quickstart takes over.
 	assert.False(t, strings.Contains(content, "### 1. Install"),
 		"generic numbered steps should be suppressed when narrative quickstart is present")
+}
+
+// TestReadmeRendersNarrativeRecipes asserts the README uses the same
+// narrative.recipes data that already feeds SKILL.md.
+func TestReadmeRendersNarrativeRecipes(t *testing.T) {
+	t.Parallel()
+
+	apiSpec := minimalSpec("recipes")
+	outputDir := filepath.Join(t.TempDir(), "recipes-pp-cli")
+	gen := New(apiSpec, outputDir)
+	gen.Narrative = &ReadmeNarrative{
+		Recipes: []Recipe{
+			{
+				Title:       "Inspect stale items",
+				Command:     "recipes-pp-cli items list --stale --json",
+				Explanation: "Find items that need review before exporting a report.",
+			},
+			{
+				Title:       "Export a focused item list",
+				Command:     "recipes-pp-cli items list --json --select id,name,status",
+				Explanation: "Return only the fields an agent needs for follow-up work.",
+			},
+			{
+				Title:   "List item names",
+				Command: "recipes-pp-cli items list --json --select name",
+			},
+		},
+	}
+	require.NoError(t, gen.Generate())
+
+	readme, err := os.ReadFile(filepath.Join(outputDir, "README.md"))
+	require.NoError(t, err)
+	content := string(readme)
+
+	recipesIdx := strings.Index(content, "\n## Recipes\n")
+	require.NotEqual(t, -1, recipesIdx, "Recipes section should render when narrative recipes are present")
+	usageIdx := strings.Index(content[recipesIdx:], "\n## Usage\n")
+	require.NotEqual(t, -1, usageIdx, "Recipes section should appear before Usage")
+	recipesSection := content[recipesIdx : recipesIdx+usageIdx]
+	assert.Contains(t, recipesSection, "### Inspect stale items\n\n```bash\nrecipes-pp-cli items list --stale --json\n```\n\nFind items that need review before exporting a report.",
+		"first recipe should render title, fenced command, and explanation")
+	assert.Contains(t, recipesSection, "### Export a focused item list\n\n```bash\nrecipes-pp-cli items list --json --select id,name,status\n```\n\nReturn only the fields an agent needs for follow-up work.",
+		"second recipe should render title, fenced command, and explanation")
+	assert.Contains(t, recipesSection, "### List item names\n\n```bash\nrecipes-pp-cli items list --json --select name\n```",
+		"recipe without explanation should still render title and fenced command")
+	assert.NotContains(t, recipesSection, "### List item names\n\n```bash\nrecipes-pp-cli items list --json --select name\n```\n\n<",
+		"recipe without explanation should not render placeholder prose")
 }
 
 // TestReadmeAppendsNarrativeTroubleshoots asserts the Troubleshooting

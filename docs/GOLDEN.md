@@ -10,6 +10,8 @@ Golden cases must be deterministic, offline, and auth-free. Do not add cases tha
 
 Passing `scripts/golden.sh verify` only proves existing fixtures did not drift. It does not prove golden coverage is complete. When adding a new deterministic CLI behavior or artifact contract, explicitly decide whether the golden suite needs a new or expanded case. Add golden coverage when the behavior is user-visible command output or persisted generated artifacts that should remain stable across refactors. Prefer unit tests for narrow helper logic, branchy internals, or cases where a golden snapshot would duplicate a focused package test without proving a CLI-level contract.
 
+Golden verification is byte-level, not compile-level. It can miss generator bugs where a template emits a call without its matching definition, or where the changed branch is not captured by the expected artifact subset. For generator/template changes that can alter emitted Go, also run `scripts/verify-generator-output.sh` so representative generated CLIs are built with `go build ./...`. Pass the specific golden case names that cover the touched variant when the default case set is not enough.
+
 ## Decision rubric
 
 - **No golden update:** code changed but the captured external behavior is intentionally identical. Run `scripts/golden.sh verify`; it should pass unchanged.
@@ -23,6 +25,8 @@ To add a case, create `testdata/golden/cases/<case-name>/`, add expected outputs
 Keep golden artifacts contract-shaped. Snapshot the specific files or output fields that demonstrate the stable behavior. Do not include broad reports, whole generated trees, or incidental diagnostics just because the harness can capture them; unrelated fields make refactors noisy and weaken the signal.
 
 Maintain `testdata/golden/fixtures/golden-api.yaml` as the purpose-built generated-CLI fixture for the Printing Press. When the machine gains deterministic generation capabilities that should survive major refactors, extend this fixture and add the smallest useful artifact comparison that proves the capability. Do not mutate this fixture for one printed CLI's edge case unless it represents a general machine behavior.
+
+Device Sniff uses separate deterministic fixtures because device specs are protocol-native rather than OpenAPI-shaped. Use `device-sniff-ble-sample` and `device-sniff-ble-ambiguous` for BLE discovery output. Use `generate-device-ble`, `generate-device-ble-control`, `generate-device-ble-session`, and `generate-device-ble-opaque` for generated device CLI artifacts.
 
 ## Failure handling
 

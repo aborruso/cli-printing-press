@@ -1,6 +1,8 @@
 module {{modulePath}}
 
-go 1.26.3
+go 1.26
+
+toolchain go1.26.4
 
 require (
 {{- if .UsesBrowserHTTPTransport}}
@@ -9,6 +11,9 @@ require (
 {{- if eq .Auth.Subtype "auth0_spa_in_memory"}}
 	github.com/chromedp/cdproto v0.0.0-20260321001828-e3e3800016bc
 	github.com/chromedp/chromedp v0.15.1
+{{- end}}
+{{- if or (eq .Auth.Type "cookie") (eq .Auth.Type "composed") .Streaming.Enabled}}
+	github.com/gorilla/websocket v1.5.3
 {{- end}}
 	github.com/spf13/cobra v1.9.1
 {{- if .HasHTMLExtraction}}

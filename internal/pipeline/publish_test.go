@@ -191,6 +191,65 @@ func TestCopyDirRejectsExternalSymlinks(t *testing.T) {
 	}
 }
 
+func TestCopyPublishableManuscriptDirFiltersSymlinks(t *testing.T) {
+	src := filepath.Join(t.TempDir(), "src")
+	dst := filepath.Join(t.TempDir(), "dst")
+	require.NoError(t, os.MkdirAll(src, 0o755))
+
+	require.NoError(t, os.WriteFile(filepath.Join(src, "notes.txt"), []byte("notes"), 0o644))
+	require.NoError(t, os.Symlink("notes.txt", filepath.Join(src, "notes-link.txt")))
+	require.NoError(t, os.Symlink("notes.txt", filepath.Join(src, "capture.har")))
+	require.NoError(t, os.WriteFile(filepath.Join(src, "raw-capture.har"), []byte("cookie: secret"), 0o644))
+	require.NoError(t, os.Symlink("raw-capture.har", filepath.Join(src, "raw-capture-link.txt")))
+
+	largeCapture := filepath.Join(src, "large-capture.bin")
+	largeFile, err := os.Create(largeCapture)
+	require.NoError(t, err)
+	require.NoError(t, largeFile.Truncate(publishableManuscriptMaxCaptureBytes))
+	require.NoError(t, largeFile.Close())
+	require.NoError(t, os.Symlink("large-capture.bin", filepath.Join(src, "large-link.bin")))
+
+	require.NoError(t, CopyPublishableManuscriptDir(src, dst))
+
+	linkInfo, err := os.Lstat(filepath.Join(dst, "notes-link.txt"))
+	require.NoError(t, err)
+	assert.NotZero(t, linkInfo.Mode()&os.ModeSymlink, "ordinary internal symlink should be preserved")
+	assert.FileExists(t, filepath.Join(dst, "notes.txt"))
+	assert.NoFileExists(t, filepath.Join(dst, "capture.har"))
+	assert.NoFileExists(t, filepath.Join(dst, "raw-capture.har"))
+	assert.NoFileExists(t, filepath.Join(dst, "raw-capture-link.txt"))
+	assert.NoFileExists(t, filepath.Join(dst, "large-capture.bin"))
+	assert.NoFileExists(t, filepath.Join(dst, "large-link.bin"))
+}
+
+// TestCopyPublishableManuscriptDirExcludesDownloadedSources ensures a research
+// `sources/` subtree (downloaded third-party reference repos) never ships into a
+// published CLI — it is local research input, not authored manuscript output, and
+// publishing copies of other projects' code is a licensing + secret/PII exposure.
+func TestCopyPublishableManuscriptDirExcludesDownloadedSources(t *testing.T) {
+	src := filepath.Join(t.TempDir(), "src")
+	dst := filepath.Join(t.TempDir(), "dst")
+
+	// Authored manuscript output that must ship.
+	require.NoError(t, os.MkdirAll(filepath.Join(src, "research"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(src, "research", "brief.md"), []byte("our synthesis"), 0o644))
+	require.NoError(t, os.MkdirAll(filepath.Join(src, "proofs"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(src, "proofs", "shipcheck.txt"), []byte("ok"), 0o644))
+
+	// Downloaded third-party reference repos under research/sources/ that must NOT ship.
+	require.NoError(t, os.MkdirAll(filepath.Join(src, "research", "sources", "thirdparty"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(src, "research", "sources", "thirdparty", "lib.py"), []byte("# someone else's code"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(src, "research", "sources", "README.md"), []byte("vendored readme"), 0o644))
+
+	require.NoError(t, CopyPublishableManuscriptDir(src, dst))
+
+	assert.FileExists(t, filepath.Join(dst, "research", "brief.md"))
+	assert.FileExists(t, filepath.Join(dst, "proofs", "shipcheck.txt"))
+	assert.NoDirExists(t, filepath.Join(dst, "research", "sources"))
+	assert.NoFileExists(t, filepath.Join(dst, "research", "sources", "thirdparty", "lib.py"))
+	assert.NoFileExists(t, filepath.Join(dst, "research", "sources", "README.md"))
+}
+
 // publishManifestEnvSetup wires PRINTING_PRESS_HOME/SCOPE/REPO_ROOT to a temp dir
 // so RunRoot()/PipelineDir()/PublishedLibraryRoot() resolve under the test sandbox.
 // Returns the temp root and a state seeded with the given run ID.
@@ -525,12 +584,18 @@ func TestWriteCLIManifestForPublish_NovelFeaturesPreservedFromCarryForward(t *te
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(filepath.Join(state.WorkingDir, CLIManifestFilename), existingData, 0o644))
 
-	// No research.json anywhere. Publish should preserve the carry-forward value.
-	require.NoError(t, writeCLIManifestForPublish(state, state.WorkingDir))
+	// No research.json anywhere. Publish should preserve the carry-forward value
+	// without warning that manual enrichment is required.
+	var stderr string
+	require.NoError(t, captureStderr(t, &stderr, func() error {
+		return writeCLIManifestForPublish(state, state.WorkingDir)
+	}))
 
 	m := readPublishedManifest(t, state.WorkingDir)
 	require.Len(t, m.NovelFeatures, 1, "carry-forward should preserve generate-time novel_features")
 	assert.Equal(t, "today", m.NovelFeatures[0].Command)
+	assert.NotContains(t, stderr, "manifest will require manual enrichment before publish")
+	assert.Contains(t, stderr, "preserving existing novel_features")
 }
 
 func TestWriteCLIManifestForPublish_AuthEnvVarSpecsPreservedFromCarryForward(t *testing.T) {
@@ -635,8 +700,51 @@ func TestWriteCLIManifestForPublish_NoResearchNoExistingManifest(t *testing.T) {
 	_, state := publishManifestEnvSetup(t, "20260427-empty-everything")
 
 	// No research.json, no existing manifest in WorkingDir.
-	require.NoError(t, writeCLIManifestForPublish(state, state.WorkingDir))
+	var stderr string
+	require.NoError(t, captureStderr(t, &stderr, func() error {
+		return writeCLIManifestForPublish(state, state.WorkingDir)
+	}))
 
 	m := readPublishedManifest(t, state.WorkingDir)
 	assert.Empty(t, m.NovelFeatures, "no novel_features when neither research nor prior manifest has any")
+	assert.Contains(t, stderr, "warning: could not locate originating run's research.json at "+
+		filepath.Join(state.RunRoot(), "research.json")+" or "+
+		filepath.Join(state.PipelineDir(), "research.json"))
+	assert.Contains(t, stderr, "manifest will require manual enrichment before publish")
+	assert.NotContains(t, stderr, "read failed")
+	assert.NotContains(t, stderr, "failed to parse")
+}
+
+func TestWriteCLIManifestForPublishReportsMalformedResearchJSON(t *testing.T) {
+	_, state := publishManifestEnvSetup(t, "20260427-bad-research")
+
+	runRoot := RunRoot(state.RunID)
+	require.NoError(t, os.MkdirAll(runRoot, 0o755))
+	path := filepath.Join(runRoot, "research.json")
+	body := []byte(`{"api_name":"test-api","novel_features":[{"name":1}]}`)
+	require.NoError(t, os.WriteFile(path, body, 0o644))
+
+	var stderr string
+	require.NoError(t, captureStderr(t, &stderr, func() error {
+		return writeCLIManifestForPublish(state, state.WorkingDir)
+	}))
+
+	assert.Contains(t, stderr, "debug: research.json at "+path+" failed to parse:")
+	assert.NotContains(t, stderr, "research.json not found at")
+}
+
+func TestWriteCLIManifestForPublishReportsUnreadableResearchJSON(t *testing.T) {
+	_, state := publishManifestEnvSetup(t, "20260427-unreadable-research")
+
+	runRoot := RunRoot(state.RunID)
+	path := filepath.Join(runRoot, "research.json")
+	require.NoError(t, os.MkdirAll(path, 0o755))
+
+	var stderr string
+	require.NoError(t, captureStderr(t, &stderr, func() error {
+		return writeCLIManifestForPublish(state, state.WorkingDir)
+	}))
+
+	assert.Contains(t, stderr, "debug: research.json at "+path+" read failed:")
+	assert.NotContains(t, stderr, "research.json not found at")
 }

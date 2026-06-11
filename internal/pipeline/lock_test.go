@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/mvanhorn/cli-printing-press/v4/internal/artifacts"
+	"github.com/mvanhorn/cli-printing-press/v4/internal/spec"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -426,6 +427,86 @@ func TestPromoteWorkingCLI_ReplacesExistingLibrary(t *testing.T) {
 	assert.NoError(t, err)
 }
 
+func TestPromoteWorkingCLI_RestoresPermanentCreatorFromExistingLibrary(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("PRINTING_PRESS_HOME", tmp)
+	t.Setenv("PRINTING_PRESS_SCOPE", "test-scope")
+	t.Setenv("PRINTING_PRESS_REPO_ROOT", tmp)
+
+	libDir := filepath.Join(PublishedLibraryRoot(), "test")
+	require.NoError(t, os.MkdirAll(libDir, 0o755))
+	require.NoError(t, WriteCLIManifest(libDir, CLIManifest{
+		SchemaVersion: CurrentCLIManifestSchemaVersion,
+		APIName:       "test",
+		CLIName:       "test-pp-cli",
+		Creator:       &spec.Person{Handle: "mvanhorn", Name: "Matt Van Horn"},
+		Contributors:  []spec.Person{{Handle: "jane-doe", Name: "Jane Doe"}},
+		Owner:         "mvanhorn",
+		Printer:       "mvanhorn",
+		PrinterName:   "Matt Van Horn",
+	}))
+
+	workDir := filepath.Join(tmp, "working", "test-pp-cli")
+	require.NoError(t, os.MkdirAll(filepath.Join(workDir, "internal", "cli"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(workDir, "go.mod"), []byte("module test-pp-cli\n\ngo 1.21\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(workDir, "internal", "cli", "root.go"), []byte("// Copyright 2026 Trevin Chow and contributors. Licensed under Apache-2.0. See LICENSE.\npackage cli\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(workDir, "README.md"), []byte("# Test CLI\n\nCreated by [@tmchow](https://github.com/tmchow) (Trevin Chow).\n\n## Install\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(workDir, "SKILL.md"), []byte("---\nname: pp-test\nauthor: \"Trevin Chow\"\n---\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(workDir, "NOTICE"), []byte("test-pp-cli\nCopyright 2026 Trevin Chow and contributors\nCreated by Trevin Chow (@tmchow).\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(workDir, "LICENSE"), []byte("Apache License\nCopyright 2026 Trevin Chow\nCopyright 2026 Trevin Chow and contributors\n"), 0o644))
+	require.NoError(t, WriteCLIManifest(workDir, CLIManifest{
+		SchemaVersion: CurrentCLIManifestSchemaVersion,
+		APIName:       "test",
+		CLIName:       "test-pp-cli",
+		Creator:       &spec.Person{Handle: "tmchow", Name: "Trevin Chow"},
+		Owner:         "tmchow",
+		Printer:       "tmchow",
+		PrinterName:   "Trevin Chow",
+	}))
+
+	_, err := AcquireLock("test-pp-cli", "test-scope", false)
+	require.NoError(t, err)
+	state := NewStateWithRun("test", workDir, "run-creator", "test-scope")
+	writePhase5PassForState(t, state, "none")
+
+	require.NoError(t, PromoteWorkingCLI("test-pp-cli", workDir, state))
+
+	manifest := readManifest(t, libDir)
+	require.NotNil(t, manifest.Creator)
+	assert.Equal(t, "mvanhorn", manifest.Creator.Handle)
+	assert.Equal(t, "Matt Van Horn", manifest.Creator.Name)
+	require.Len(t, manifest.Contributors, 2)
+	assert.Equal(t, "tmchow", manifest.Contributors[0].Handle, "reprinter must be front-listed")
+	assert.Equal(t, "jane-doe", manifest.Contributors[1].Handle)
+
+	rootGo, err := os.ReadFile(filepath.Join(libDir, "internal", "cli", "root.go"))
+	require.NoError(t, err)
+	assert.Contains(t, string(rootGo), "Copyright 2026 Matt Van Horn and contributors.")
+	assert.NotContains(t, string(rootGo), "Trevin Chow and contributors.")
+
+	readme, err := os.ReadFile(filepath.Join(libDir, "README.md"))
+	require.NoError(t, err)
+	assert.Contains(t, string(readme), "Created by [@mvanhorn](https://github.com/mvanhorn) (Matt Van Horn).")
+	assert.Contains(t, string(readme), "Contributors: [@tmchow](https://github.com/tmchow) (Trevin Chow), [@jane-doe](https://github.com/jane-doe) (Jane Doe).")
+	assert.NotContains(t, string(readme), "Created by [@tmchow]")
+
+	skill, err := os.ReadFile(filepath.Join(libDir, "SKILL.md"))
+	require.NoError(t, err)
+	assert.Contains(t, string(skill), `author: "Matt Van Horn"`)
+
+	notice, err := os.ReadFile(filepath.Join(libDir, "NOTICE"))
+	require.NoError(t, err)
+	assert.Contains(t, string(notice), "Created by Matt Van Horn (@mvanhorn).")
+	assert.Contains(t, string(notice), "Trevin Chow (@tmchow)")
+	assert.Contains(t, string(notice), "Jane Doe (@jane-doe)")
+
+	license, err := os.ReadFile(filepath.Join(libDir, "LICENSE"))
+	require.NoError(t, err)
+	assert.Contains(t, string(license), "Copyright 2026 Matt Van Horn\n")
+	assert.Contains(t, string(license), "Copyright 2026 Matt Van Horn and contributors\n")
+	assert.NotContains(t, string(license), "Copyright 2026 Trevin Chow")
+}
+
 func TestPromoteWorkingCLI_EmptyWorkingDir(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("PRINTING_PRESS_HOME", tmp)
@@ -593,6 +674,47 @@ func TestPromoteWorkingCLI_RejectsManualPhase5Marker(t *testing.T) {
 	assert.ErrorIs(t, statErr, os.ErrNotExist)
 }
 
+func TestPromoteWorkingCLI_AllowsSyntheticExternalCredentialPhase5Skip(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("PRINTING_PRESS_HOME", tmp)
+	t.Setenv("PRINTING_PRESS_SCOPE", "test-scope")
+	t.Setenv("PRINTING_PRESS_REPO_ROOT", tmp)
+
+	workDir := filepath.Join(tmp, "working", "aws-billing-pp-cli")
+	require.NoError(t, os.MkdirAll(workDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(workDir, "go.mod"), []byte("module aws-billing-pp-cli\n\ngo 1.21\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(workDir, "main.go"), []byte("package main\nfunc main() {}\n"), 0o644))
+	require.NoError(t, WriteCLIManifest(workDir, CLIManifest{
+		SchemaVersion: CurrentCLIManifestSchemaVersion,
+		APIName:       "aws-billing",
+		CLIName:       "aws-billing-pp-cli",
+		RunID:         "run-synthetic-skip",
+		AuthType:      "none",
+		SpecKind:      spec.KindSynthetic,
+	}))
+
+	state := NewStateWithRun("aws-billing", workDir, "run-synthetic-skip", "test-scope")
+	writePhase5GateMarker(t, state.ProofsDir(), Phase5SkipFilename, Phase5GateMarker{
+		SchemaVersion: 1,
+		APIName:       state.APIName,
+		RunID:         state.RunID,
+		Status:        "skip",
+		Level:         "none",
+		SkipReason:    phase5SkipReasonExternalCredentialsUnavailable,
+		AuthContext:   Phase5AuthContext{Type: "oauth2", APIKeyAvailable: false},
+	})
+
+	err := PromoteWorkingCLI("aws-billing-pp-cli", workDir, state)
+	require.NoError(t, err)
+
+	libDir := filepath.Join(PublishedLibraryRoot(), "aws-billing")
+	data, err := os.ReadFile(filepath.Join(libDir, CLIManifestFilename))
+	require.NoError(t, err)
+	var got CLIManifest
+	require.NoError(t, json.Unmarshal(data, &got))
+	assert.Equal(t, "synthetic", got.SpecKind)
+}
+
 func TestPromoteWorkingCLI_MinimalStateNoRunstate(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("PRINTING_PRESS_HOME", tmp)
@@ -645,10 +767,13 @@ func TestPromoteWorkingCLI_StagesRunstateManuscripts(t *testing.T) {
 
 	// Plant research and discovery alongside the phase5 marker so we can
 	// assert the whole runstate triplet gets staged into the published copy.
+	require.NoError(t, os.WriteFile(filepath.Join(state.RunRoot(), "research.json"), []byte(`{"summary":"root research"}`+"\n"), 0o644))
 	require.NoError(t, os.MkdirAll(state.ResearchDir(), 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(state.ResearchDir(), "notes.md"), []byte("research notes\n"), 0o644))
 	require.NoError(t, os.MkdirAll(state.DiscoveryDir(), 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(state.DiscoveryDir(), "endpoints.json"), []byte("{}\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(state.DiscoveryDir(), "browser-sniff-capture.har"), []byte("cookie: session=secret\nemail: user@example.com\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(state.DiscoveryDir(), "traffic-analysis.json"), []byte(`{"auth_stripped":true}`+"\n"), 0o644))
 
 	err = PromoteWorkingCLI("test-pp-cli", workDir, state)
 	require.NoError(t, err)
@@ -661,13 +786,22 @@ func TestPromoteWorkingCLI_StagesRunstateManuscripts(t *testing.T) {
 	_, err = os.Stat(filepath.Join(manuRoot, "proofs", Phase5AcceptanceFilename))
 	assert.NoError(t, err, "phase5 acceptance marker should be staged into the published copy")
 
-	data, err := os.ReadFile(filepath.Join(manuRoot, "research", "notes.md"))
+	data, err := os.ReadFile(filepath.Join(manuRoot, "research.json"))
+	require.NoError(t, err)
+	assert.Equal(t, "{\"summary\":\"root research\"}\n", string(data))
+
+	data, err = os.ReadFile(filepath.Join(manuRoot, "research", "notes.md"))
 	require.NoError(t, err)
 	assert.Equal(t, "research notes\n", string(data))
 
 	data, err = os.ReadFile(filepath.Join(manuRoot, "discovery", "endpoints.json"))
 	require.NoError(t, err)
 	assert.Equal(t, "{}\n", string(data))
+
+	assert.NoFileExists(t, filepath.Join(manuRoot, "discovery", "browser-sniff-capture.har"))
+	data, err = os.ReadFile(filepath.Join(manuRoot, "discovery", "traffic-analysis.json"))
+	require.NoError(t, err)
+	assert.Equal(t, "{\"auth_stripped\":true}\n", string(data))
 }
 
 func TestPromoteWorkingCLI_PreservesPreexistingManuscripts(t *testing.T) {
@@ -836,6 +970,11 @@ func setLockOwnerAliveForTest(t *testing.T, alive bool) {
 	t.Cleanup(func() { lockOwnerAliveFunc = original })
 }
 
+func TestShellQuote(t *testing.T) {
+	assert.Equal(t, "'/tmp/my project/run1'", shellQuote("/tmp/my project/run1"))
+	assert.Equal(t, "'/tmp/alice'\\''s project/run1'", shellQuote("/tmp/alice's project/run1"))
+}
+
 // ---------------------------------------------------------------------------
 // PII gate (U3)
 // ---------------------------------------------------------------------------
@@ -852,7 +991,7 @@ func TestPromoteWorkingCLI_PIIGateHaltsOnPendingFindings(t *testing.T) {
 	// Plant real-shaped PII in a high-risk file
 	require.NoError(t, os.WriteFile(
 		filepath.Join(workDir, "data.json"),
-		[]byte(`{"customer_email": "alice@example.com"}`+"\n"),
+		[]byte(`{"customer_email": "alice@gmail.com"}`+"\n"),
 		0o644,
 	))
 
@@ -885,7 +1024,7 @@ func TestPromoteWorkingCLI_PIIGatePassesWithValidAccepts(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(workDir, "go.mod"), []byte("module test-pp-cli\n\ngo 1.21\n"), 0o644))
 	require.NoError(t, os.WriteFile(
 		filepath.Join(workDir, "data.json"),
-		[]byte(`{"customer_email": "alice@example.com"}`+"\n"),
+		[]byte(`{"customer_email": "alice@gmail.com"}`+"\n"),
 		0o644,
 	))
 
@@ -923,6 +1062,57 @@ func TestPromoteWorkingCLI_PIIGatePassesWithValidAccepts(t *testing.T) {
 	assert.NoError(t, statErr, "ledger should travel with the staged copy")
 }
 
+func TestPromoteWorkingCLI_PIIGatePreservesAcceptedRunResearch(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("PRINTING_PRESS_HOME", tmp)
+	t.Setenv("PRINTING_PRESS_SCOPE", "test-scope")
+	t.Setenv("PRINTING_PRESS_REPO_ROOT", tmp)
+
+	workDir := filepath.Join(tmp, "working", "test-pp-cli")
+	require.NoError(t, os.MkdirAll(workDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(workDir, "go.mod"), []byte("module test-pp-cli\n\ngo 1.21\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(workDir, "main.go"), []byte("package main\nfunc main() {}\n"), 0o644))
+
+	_, err := AcquireLock("test-pp-cli", "test-scope", false)
+	require.NoError(t, err)
+
+	state := NewStateWithRun("test", workDir, "run-pii-manuscript", "test-scope")
+	writePhase5PassForState(t, state, "none")
+	require.NoError(t, os.WriteFile(
+		filepath.Join(state.RunRoot(), "research.json"),
+		[]byte(`{"narrative":{"auth_narrative":"Contact functioneelbeheer@tenderned.nl for access."}}`+"\n"),
+		0o644,
+	))
+
+	preflight, err := artifacts.FindPIIWithOptions(workDir, artifacts.PIIAuditOptions{ManuscriptsDir: state.RunRoot()})
+	require.NoError(t, err)
+	require.Len(t, preflight, 1)
+	require.Equal(t, ".manuscripts/run-pii-manuscript/research.json", preflight[0].File)
+	preflight[0].Status = artifacts.PIIStatusAccepted
+	preflight[0].Category = artifacts.PIICategoryAPIProviderData
+	preflight[0].EvidenceContext = "research narrative names the API provider's public support email"
+	require.NoError(t, artifacts.WritePIILedger(workDir, &artifacts.PIILedger{
+		Timestamp:           time.Now().UTC(),
+		CLIDir:              workDir,
+		Findings:            preflight,
+		FindingsCountBefore: 1,
+	}))
+
+	err = PromoteWorkingCLI("test-pp-cli", workDir, state)
+	require.NoError(t, err)
+
+	libDir := filepath.Join(PublishedLibraryRoot(), "test")
+	ledger := artifacts.ReadPIILedger(libDir)
+	require.NotNil(t, ledger)
+	require.Len(t, ledger.Findings, 1)
+	assert.Equal(t, ".manuscripts/run-pii-manuscript/research.json", ledger.Findings[0].File)
+	assert.Equal(t, artifacts.PIIStatusAccepted, ledger.Findings[0].Status)
+
+	result, err := artifacts.RunPIIAudit(libDir)
+	require.NoError(t, err)
+	assert.Zero(t, artifacts.PIIPendingCount(result.Findings))
+}
+
 func TestPromoteWorkingCLI_PIIGateHaltsOnGateFailure(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("PRINTING_PRESS_HOME", tmp)
@@ -936,7 +1126,7 @@ func TestPromoteWorkingCLI_PIIGateHaltsOnGateFailure(t *testing.T) {
 	// duplicate-rationale gate (threshold 5)
 	var lines []string
 	for i := range 6 {
-		lines = append(lines, `"email": "user`+string(rune('A'+i))+`@example.com"`)
+		lines = append(lines, `"email": "user`+string(rune('A'+i))+`@gmail.com"`)
 	}
 	require.NoError(t, os.WriteFile(
 		filepath.Join(workDir, "data.json"),

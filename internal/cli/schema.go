@@ -38,7 +38,8 @@ const trafficAnalysisSchemaJSON = `{
         "mode": {"type": "string", "enum": ["standard_http", "browser_http", "browser_clearance_http", "browser_required", "blocked", "unknown"]},
         "confidence": {"type": "number", "minimum": 0, "maximum": 1},
         "reasons": {"type": "array", "items": {"type": "string"}},
-        "evidence": {"type": "array", "items": {"oneOf": [{"$ref": "#/$defs/evidence_ref"}, {"type": "string"}]}}
+        "evidence": {"type": "array", "items": {"oneOf": [{"$ref": "#/$defs/evidence_ref"}, {"type": "string"}]}},
+        "impersonation_safe": {"type": "boolean"}
       }
     },
     "protocols": {"type": "array", "items": {"$ref": "#/$defs/protocol_observation"}},
@@ -241,7 +242,8 @@ const phase5MarkerSchemaJSON = `{
       "properties": {
         "type": {"type": "string"},
         "api_key_available": {"type": "boolean"},
-        "browser_session_available": {"type": "boolean"}
+        "browser_session_available": {"type": "boolean"},
+        "local_sqlite": {"type": "boolean"}
       }
     },
     "failure_summary": {
@@ -283,7 +285,9 @@ const phase5SkipSchemaJSON = `{
       "properties": {
         "type": {"type": "string"},
         "api_key_available": {"type": "boolean"},
-        "browser_session_available": {"type": "boolean"}
+        "browser_session_available": {"type": "boolean"},
+        "local_sqlite": {"type": "boolean"},
+        "local_network_only": {"type": "boolean"}
       }
     }
   }

@@ -16,6 +16,73 @@ import (
 // Detector behavior
 // ---------------------------------------------------------------------------
 
+func TestRedactPIIText_RedactsJSONPII(t *testing.T) {
+	got := RedactPIIText(`{"name":"Jane Doe","email":"jane@example.com","address":"123 Main Street","id":42,"status":"active"}`)
+
+	require.NotContains(t, got, "Jane Doe")
+	require.NotContains(t, got, "jane@example.com")
+	require.NotContains(t, got, "123 Main Street")
+	require.Contains(t, got, `"name":"<redacted>"`)
+	require.Contains(t, got, `"email":"<redacted>"`)
+	require.Contains(t, got, `"address":"<redacted>"`)
+	require.Contains(t, got, `"id":42`)
+	require.Contains(t, got, `"status":"active"`)
+}
+
+func TestRedactPIIText_LeavesStructuralJSONUnchanged(t *testing.T) {
+	input := `{"id":42,"status":"active"}`
+
+	require.Equal(t, input, RedactPIIText(input))
+}
+
+func TestRedactPIIJSONKeys_RedactsWithoutPatternSweep(t *testing.T) {
+	got, changed := RedactPIIJSONKeys(`{"name":"Jane Doe","note":"contact jane@example.com","id":42}`)
+
+	require.True(t, changed)
+	require.NotContains(t, got, "Jane Doe")
+	require.Contains(t, got, `"name":"<redacted>"`)
+	require.Contains(t, got, "jane@example.com")
+	require.Contains(t, got, `"id":42`)
+}
+
+func TestRedactPIIJSONKeys_RedactsNDJSON(t *testing.T) {
+	got, changed := RedactPIIJSONKeys("{\"name\":\"Jane Doe\"}\n{\"status\":\"active\"}\n{\"invoice_number\":\"INV-12345\"}")
+
+	require.True(t, changed)
+	require.NotContains(t, got, "Jane Doe")
+	require.NotContains(t, got, "INV-12345")
+	require.Contains(t, got, `"name":"<redacted>"`)
+	require.Contains(t, got, `"invoice_number":"<redacted>"`)
+	require.Contains(t, got, `"status":"active"`)
+}
+
+func TestRedactPIIJSONKeys_FragmentRedactsValueWhenKeyEqualsValue(t *testing.T) {
+	got, changed := RedactPIIJSONKeys(`prefix {"name":"name",`)
+
+	require.True(t, changed)
+	require.Contains(t, got, `"name":"<redacted>"`)
+	require.NotContains(t, got, `"<redacted>":"name"`)
+}
+
+func TestRedactPIIText_RedactsPlainTextPatterns(t *testing.T) {
+	got := RedactPIIText("billing email jane@gmail.com lives at 123 Main Street")
+
+	require.NotContains(t, got, "jane@gmail.com")
+	require.NotContains(t, got, "123 Main Street")
+	require.Contains(t, got, PIIRedactedSentinel)
+}
+
+func TestRedactPIIText_KeepsGitHubContextIDAndReservedValues(t *testing.T) {
+	got := RedactPIIText("see #issuecomment-3249672648 and email user@example.com or call 212-555-0142")
+	require.Contains(t, got, "3249672648", "GitHub comment ID must not be redacted")
+	require.Contains(t, got, "user@example.com", "reserved example.com email must not be redacted")
+	require.Contains(t, got, "212-555-0142", "NANP fictional phone must not be redacted")
+
+	real := RedactPIIText("reach me at 415-234-5678")
+	require.NotContains(t, real, "415-234-5678", "a real phone must still be redacted")
+	require.Contains(t, real, PIIRedactedSentinel)
+}
+
 func TestFindPII_CardLast4(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -64,13 +131,13 @@ func TestFindPII_OrderIDs(t *testing.T) {
 	}
 }
 
-func TestFindPII_ASINs(t *testing.T) {
+func TestFindPII_ASINsAreNotPhase1Findings(t *testing.T) {
 	tests := []struct {
 		name        string
 		line        string
 		expectKinds []string
 	}{
-		{name: "real-asin", line: `"asin": "B012345678"`, expectKinds: []string{PIIKindASIN}},
+		{name: "real-asin", line: `"asin": "B012345678"`, expectKinds: nil},
 		{name: "synthetic-asin", line: `"asin": "B0EXAMPLE1"`, expectKinds: nil},
 		{name: "not-asin", line: `"sku": "A012345678"`, expectKinds: nil},
 	}
@@ -82,14 +149,62 @@ func TestFindPII_ASINs(t *testing.T) {
 	}
 }
 
+func TestRunPIIAudit_ASINDocumentationExamplesDoNotBlock(t *testing.T) {
+	dir := t.TempDir()
+	write(t, filepath.Join(dir, "README.md"), strings.Join([]string{
+		"```bash",
+		"amazon-product get --asin B09B93ZDG4",
+		"amazon-product get --asin B0BFC7WQ6R",
+		"amazon-product compare --asin B09B93ZDG4",
+		"amazon-product compare --asin B0BFC7WQ6R",
+		"```",
+	}, "\n"))
+	write(t, filepath.Join(dir, "SKILL.md"), strings.Join([]string{
+		"Use B09B93ZDG4 as the sample product identifier.",
+		"Use B0BFC7WQ6R when showing product comparison.",
+		"Run with B09B93ZDG4 for a speaker example.",
+		"Run with B0BFC7WQ6R for a display example.",
+	}, "\n"))
+	write(t, filepath.Join(dir, ".manuscripts", "run1", "research.json"), strings.Join([]string{
+		`{"example_asin":"B09B93ZDG4"}`,
+		`{"example_asin":"B0BFC7WQ6R"}`,
+		`{"example_asin":"B09B93ZDG4"}`,
+		`{"example_asin":"B0BFC7WQ6R"}`,
+	}, "\n"))
+
+	result, err := RunPIIAudit(dir)
+	require.NoError(t, err)
+	assert.Empty(t, result.Findings)
+	assert.Equal(t, 0, PIIPendingCount(result.Findings))
+	assert.False(t, result.Completion.HasGateFailure())
+}
+
+func TestRunPIIAudit_OrderIDStillBlocks(t *testing.T) {
+	dir := t.TempDir()
+	write(t, filepath.Join(dir, ".manuscripts", "run1", "research.json"), `{"order_id":"123-4567890-1234567"}`)
+
+	result, err := RunPIIAudit(dir)
+	require.NoError(t, err)
+	require.Len(t, result.Findings, 1)
+	assert.Equal(t, PIIKindOrderID, result.Findings[0].Kind)
+	assert.Equal(t, 1, PIIPendingCount(result.Findings))
+	assert.False(t, result.Completion.HasGateFailure())
+}
+
 func TestFindPII_Email(t *testing.T) {
 	tests := []struct {
 		name        string
 		line        string
 		expectKinds []string
 	}{
-		{name: "standard", line: `"email": "alice@example.com"`, expectKinds: []string{PIIKindEmail}},
-		{name: "plus-tag", line: `"email": "alice+tag@example.com"`, expectKinds: []string{PIIKindEmail}},
+		{name: "standard", line: `"email": "customer@gmail.com"`, expectKinds: []string{PIIKindEmail}},
+		{name: "plus-tag", line: `"email": "customer+tag@gmail.com"`, expectKinds: []string{PIIKindEmail}},
+		{name: "reserved-example-com", line: `"email": "alice@example.com"`, expectKinds: nil},
+		{name: "reserved-example-org", line: `"email": "anything@example.org"`, expectKinds: nil},
+		{name: "reserved-example-net-subdomain", line: `"email": "user@docs.example.net"`, expectKinds: nil},
+		{name: "reserved-test-tld", line: `"email": "printer@app.test"`, expectKinds: nil},
+		{name: "reserved-localhost-tld", line: `"email": "printer@app.localhost"`, expectKinds: nil},
+		{name: "reserved-invalid-tld", line: `"email": "printer@app.invalid"`, expectKinds: nil},
 		{name: "no-tld", line: `"handle": "alice@example"`, expectKinds: nil},
 		{name: "missing-at", line: `"site": "example.com"`, expectKinds: nil},
 	}
@@ -107,9 +222,13 @@ func TestFindPII_PhoneUS(t *testing.T) {
 		line        string
 		expectKinds []string
 	}{
-		{name: "parens-space-dash", line: `"phone": "(415) 555-0123"`, expectKinds: []string{PIIKindPhoneUS}},
-		{name: "all-dashes", line: `"phone": "415-555-0123"`, expectKinds: []string{PIIKindPhoneUS}},
-		{name: "country-code", line: `"phone": "+1 415 555 0123"`, expectKinds: []string{PIIKindPhoneUS}},
+		{name: "parens-space-dash", line: `"phone": "(415) 234-5678"`, expectKinds: []string{PIIKindPhoneUS}},
+		{name: "all-dashes", line: `"phone": "415-234-5678"`, expectKinds: []string{PIIKindPhoneUS}},
+		{name: "country-code", line: `"phone": "+1 415 234 5678"`, expectKinds: []string{PIIKindPhoneUS}},
+		{name: "fictional-exchange-dashes", line: `"phone": "415-555-0123"`, expectKinds: nil},
+		{name: "fictional-exchange-parens", line: `"phone": "(212) 555-0100"`, expectKinds: nil},
+		{name: "fictional-exchange-country-code", line: `"phone": "+1 415 555 0199"`, expectKinds: nil},
+		{name: "fictional-555-area-compact", line: `"phone": "5555550100"`, expectKinds: nil},
 		{name: "version-string", line: `"version": "1.2.3"`, expectKinds: nil},
 		{name: "ip-address", line: `"addr": "192.168.1.1"`, expectKinds: nil},
 		// NANP-shape filters — area code and exchange code must each
@@ -124,12 +243,32 @@ func TestFindPII_PhoneUS(t *testing.T) {
 		{name: "no-area-code-leading-one", line: `"phone": "115-555-0123"`, expectKinds: nil},
 		{name: "no-exchange-leading-zero", line: `"phone": "415-055-0123"`, expectKinds: nil},
 		{name: "no-exchange-leading-one", line: `"phone": "415-155-0123"`, expectKinds: nil},
-		{name: "area-code-212-valid", line: `"phone": "(212) 555-0123"`, expectKinds: []string{PIIKindPhoneUS}},
+		{name: "area-code-212-valid", line: `"phone": "(212) 234-5678"`, expectKinds: []string{PIIKindPhoneUS}},
 		{name: "area-code-900-valid", line: `"phone": "(900) 234-5678"`, expectKinds: []string{PIIKindPhoneUS}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := scanLine(t, tt.line, "test.json")
+			assertKinds(t, got, tt.expectKinds, PIIKindPhoneUS)
+		})
+	}
+}
+
+func TestFindPII_PhoneUS_GitHubContextIDSkips(t *testing.T) {
+	tests := []struct {
+		name        string
+		line        string
+		expectKinds []string
+	}{
+		{name: "comment-id", line: `see comment id 3249672558`, expectKinds: nil},
+		{name: "issuecomment-anchor", line: `https://github.com/o/r/pull/12#issuecomment-3249672648`, expectKinds: nil},
+		{name: "comments-url-path", line: `https://github.com/o/r/issues/5/comments/3249672700`, expectKinds: nil},
+		{name: "bare-real-phone-no-github-token", line: `contact 4152345678`, expectKinds: []string{PIIKindPhoneUS}},
+		{name: "bare-commit-word-near-real-phone-still-flags", line: `we will commit then call 4152345678`, expectKinds: []string{PIIKindPhoneUS}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := scanLine(t, tt.line, "README.md")
 			assertKinds(t, got, tt.expectKinds, PIIKindPhoneUS)
 		})
 	}
@@ -191,11 +330,11 @@ func TestFindPII_PostalAddress(t *testing.T) {
 func TestFindPII_FileScoping(t *testing.T) {
 	root := t.TempDir()
 	// Same PII shape planted in different file types
-	pii := `"email": "leak@example.com"`
+	pii := `"email": "leak@gmail.com"`
 	write(t, filepath.Join(root, "in-scope.json"), pii)
 	write(t, filepath.Join(root, "in-scope.yaml"), pii)
 	write(t, filepath.Join(root, "in-scope.md"), pii)
-	write(t, filepath.Join(root, "in_scope_test.go"), pii)
+	write(t, filepath.Join(root, "out_of_scope_test.go"), pii)
 	write(t, filepath.Join(root, "out-of-scope.go"), pii)
 	write(t, filepath.Join(root, "out-of-scope.txt"), pii)
 	write(t, filepath.Join(root, "out-of-scope.lock"), pii)
@@ -205,14 +344,16 @@ func TestFindPII_FileScoping(t *testing.T) {
 
 	files := uniqueFiles(findings)
 	assert.ElementsMatch(t, []string{
-		"in-scope.json", "in-scope.yaml", "in-scope.md", "in_scope_test.go",
+		"in-scope.json", "in-scope.yaml", "in-scope.md",
 	}, files)
 }
 
 func TestFindPII_DirScoping(t *testing.T) {
 	root := t.TempDir()
-	pii := `"phone": "(415) 555-0123"`
-	// .manuscripts and testdata are in scope regardless of extension
+	pii := `"phone": "(415) 234-5678"`
+	// .manuscripts is in scope regardless of extension. testdata is
+	// intentionally excluded because generated fixtures commonly carry
+	// synthetic placeholder values.
 	require.NoError(t, os.MkdirAll(filepath.Join(root, ".manuscripts", "run1"), 0755))
 	require.NoError(t, os.MkdirAll(filepath.Join(root, "testdata", "fixtures"), 0755))
 	require.NoError(t, os.MkdirAll(filepath.Join(root, "internal"), 0755))
@@ -225,13 +366,35 @@ func TestFindPII_DirScoping(t *testing.T) {
 
 	files := uniqueFiles(findings)
 	assert.Contains(t, files, ".manuscripts/run1/raw.har")
-	assert.Contains(t, files, "testdata/fixtures/sample.txt")
+	assert.NotContains(t, files, "testdata/fixtures/sample.txt")
 	assert.NotContains(t, files, "internal/client.go")
+}
+
+func TestFindPII_SkipsFixtureAndToolingWorkspaces(t *testing.T) {
+	root := t.TempDir()
+	pii := `"email": "leak@gmail.com"`
+	write(t, filepath.Join(root, "helpers_test.go"), pii)
+	write(t, filepath.Join(root, "testdata", "fixtures", "sample.json"), pii)
+	write(t, filepath.Join(root, ".omc", "state.json"), pii)
+	write(t, filepath.Join(root, ".claude", "scratch.md"), pii)
+	write(t, filepath.Join(root, "config.yaml"), pii)
+	write(t, filepath.Join(root, "README.md"), pii)
+
+	findings, err := FindPII(root)
+	require.NoError(t, err)
+
+	files := uniqueFiles(findings)
+	assert.NotContains(t, files, "helpers_test.go")
+	assert.NotContains(t, files, "testdata/fixtures/sample.json")
+	assert.NotContains(t, files, ".omc/state.json")
+	assert.NotContains(t, files, ".claude/scratch.md")
+	assert.Contains(t, files, "config.yaml")
+	assert.Contains(t, files, "README.md")
 }
 
 func TestFindPII_ExcludedFiles(t *testing.T) {
 	root := t.TempDir()
-	pii := `"email": "leak@example.com"`
+	pii := `"email": "leak@gmail.com"`
 	write(t, filepath.Join(root, "tools-manifest.json"), pii)
 	write(t, filepath.Join(root, "data.json"), pii)
 
@@ -249,7 +412,7 @@ func TestFindPII_ExcludedFiles(t *testing.T) {
 // .manuscripts/ is captured content and stays in scope.
 func TestFindPII_RootVendorSpecExempt(t *testing.T) {
 	root := t.TempDir()
-	pii := `"email": "jenny@example.com"`
+	pii := `"email": "jenny@gmail.com"`
 	write(t, filepath.Join(root, "spec.yaml"), pii)
 	write(t, filepath.Join(root, "spec.yml"), pii)
 	write(t, filepath.Join(root, "spec.json"), pii)
@@ -267,10 +430,11 @@ func TestFindPII_RootVendorSpecExempt(t *testing.T) {
 	assert.Contains(t, files, "config.yaml")
 }
 
-// Negative: nested spec.yaml files are captured content, not vendor
-// source. They stay in scope so browser-sniff captures keep flagging.
+// Negative: nested spec.yaml files outside fixture directories are captured
+// content, not vendor source. They stay in scope so browser-sniff captures keep
+// flagging.
 // Two scope re-entry paths are exercised:
-//   - high-risk dirs (.manuscripts/, testdata/) match via highRiskDirGlobs
+//   - high-risk dirs (.manuscripts/) match via highRiskDirGlobs
 //   - arbitrary subdirs (output/) match via the *.yaml entry in
 //     highRiskFileGlobs; pinned here as a regression guard against a
 //     future tweak that broadens the exemption from depth-1 to all paths
@@ -293,7 +457,7 @@ func TestFindPII_NestedSpecYamlStillScans(t *testing.T) {
 
 	files := uniqueFiles(findings)
 	assert.Contains(t, files, ".manuscripts/run1/research/spec.yaml")
-	assert.Contains(t, files, "testdata/spec.yaml")
+	assert.NotContains(t, files, "testdata/spec.yaml")
 	assert.Contains(t, files, "output/spec.yaml")
 }
 
@@ -365,10 +529,28 @@ paths:
 		"Swagger 2.0 JSON in manuscripts must be exempt")
 }
 
+func TestFindPIIWithOptions_ManuscriptsVendorSpecExemptUsesStagedPath(t *testing.T) {
+	root := t.TempDir()
+	runDir := filepath.Join(t.TempDir(), "manuscripts", "acme", "run1")
+	openapiJSON := `{
+  "openapi": "3.0.3",
+  "info": {"title": "Calendars"},
+  "paths": {"/users": {"post": {"requestBody": {"content": {"application/json": {"example": {"email": "user1@testemail.com"}}}}}}}
+}`
+	write(t, filepath.Join(runDir, "research.json"), openapiJSON)
+	write(t, filepath.Join(runDir, "research", "brief.md"), "Contact support@gmail.com for access.\n")
+
+	findings, err := FindPIIWithOptions(root, PIIAuditOptions{ManuscriptsDir: runDir})
+	require.NoError(t, err)
+
+	files := uniqueFiles(findings)
+	assert.NotContains(t, files, ".manuscripts/run1/research.json")
+	assert.Contains(t, files, ".manuscripts/run1/research/brief.md")
+}
+
 // Negative regression: vendor-spec content detection only applies inside
-// .manuscripts/. A file at docs/api.yaml or testdata/openapi.json with
-// OpenAPI markers still scans — those are committed, hand-curated
-// artifacts that could legitimately accumulate real PII.
+// .manuscripts/. A file at docs/api.yaml with OpenAPI markers still scans —
+// committed, hand-curated artifacts could legitimately accumulate real PII.
 func TestFindPII_VendorSpecOutsideManuscriptsStillScans(t *testing.T) {
 	root := t.TempDir()
 	openapiYAML := `openapi: 3.0.0
@@ -384,9 +566,7 @@ paths:
               email: leaked@victim.com
 `
 	require.NoError(t, os.MkdirAll(filepath.Join(root, "docs"), 0755))
-	require.NoError(t, os.MkdirAll(filepath.Join(root, "testdata"), 0755))
 	write(t, filepath.Join(root, "docs", "api.yaml"), openapiYAML)
-	write(t, filepath.Join(root, "testdata", "openapi.json"), `{"openapi":"3.0.0","info":{"title":"x"},"paths":{"/u":{"post":{"requestBody":{"content":{"application/json":{"example":{"email":"leaked@victim.com"}}}}}}}}`)
 
 	findings, err := FindPII(root)
 	require.NoError(t, err)
@@ -394,8 +574,6 @@ paths:
 	files := uniqueFiles(findings)
 	assert.Contains(t, files, "docs/api.yaml",
 		"vendor-spec exemption must not bypass docs/ committed artifacts")
-	assert.Contains(t, files, "testdata/openapi.json",
-		"vendor-spec exemption must not bypass testdata fixtures")
 }
 
 // Negative regression: HARs and session-state captures under
@@ -525,7 +703,7 @@ openapi: 3.0.0
 func TestFindPII_BinaryFileSkip(t *testing.T) {
 	root := t.TempDir()
 	// Planted PII in a "json" file with embedded nulls (mimics binary)
-	bin := []byte("\"email\": \"leak@example.com\"\x00\x00\x00binary content")
+	bin := []byte("\"email\": \"leak@gmail.com\"\x00\x00\x00binary content")
 	require.NoError(t, os.WriteFile(filepath.Join(root, "blob.json"), bin, 0644))
 
 	findings, err := FindPII(root)
@@ -536,9 +714,9 @@ func TestFindPII_BinaryFileSkip(t *testing.T) {
 func TestFindPII_StableOrder(t *testing.T) {
 	root := t.TempDir()
 	content := strings.Join([]string{
-		`"email": "alice@example.com"`,  // line 1, kind email
+		`"email": "alice@gmail.com"`,    // line 1, kind email
 		`"address": "1234 MAIN STREET"`, // line 2, kind postal-address
-		`"phone": "(415) 555-0123"`,     // line 3, kind phone-us
+		`"phone": "(415) 234-5678"`,     // line 3, kind phone-us
 	}, "\n")
 	write(t, filepath.Join(root, "data.json"), content)
 
@@ -622,6 +800,36 @@ func TestRunPIIAudit_RedactsCLIDirInLedger(t *testing.T) {
 	got := ReadPIILedger(dir)
 	require.NotNil(t, got)
 	assert.Equal(t, filepath.Join(CLIDirPlaceholder, filepath.Base(dir)), got.CLIDir)
+}
+
+func TestRunPIIAuditWithOptions_ManuscriptAcceptCarriesIntoStagedPackage(t *testing.T) {
+	cliDir := t.TempDir()
+	runID := "20260517-211252"
+	runDir := filepath.Join(t.TempDir(), "manuscripts", "tenderned", runID)
+	contactLine := `{"narrative":{"auth_narrative":"Contact functioneelbeheer@tenderned.nl"}}` + "\n"
+	write(t, filepath.Join(runDir, "research.json"), contactLine)
+
+	_, err := RunPIIAuditWithOptions(cliDir, PIIAuditOptions{ManuscriptsDir: runDir})
+	require.NoError(t, err)
+	mutatePIILedger(t, cliDir, func(ledger *PIILedger) {
+		require.Len(t, ledger.Findings, 1)
+		ledger.Findings[0].Status = PIIStatusAccepted
+		ledger.Findings[0].Category = PIICategoryAPIProviderData
+		ledger.Findings[0].EvidenceContext = "vendor contact email surfaced in generated auth narrative"
+	})
+
+	stagedDir := t.TempDir()
+	write(t, filepath.Join(stagedDir, ".manuscripts", runID, "research.json"), contactLine)
+	ledgerData, err := os.ReadFile(filepath.Join(cliDir, PIILedgerFilename))
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(stagedDir, PIILedgerFilename), ledgerData, 0644))
+
+	result, err := RunPIIAudit(stagedDir)
+	require.NoError(t, err)
+	require.Len(t, result.Findings, 1)
+	assert.Equal(t, PIIStatusAccepted, result.Findings[0].Status)
+	assert.Equal(t, ".manuscripts/"+runID+"/research.json", result.Findings[0].File)
+	assert.Equal(t, 0, PIIPendingCount(result.Findings))
 }
 
 func TestReadPIILedger_CorruptDeletesFile(t *testing.T) {
@@ -958,6 +1166,14 @@ func write(t *testing.T, path, content string) {
 	t.Helper()
 	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0755))
 	require.NoError(t, os.WriteFile(path, []byte(content), 0644))
+}
+
+func mutatePIILedger(t *testing.T, dir string, mutate func(*PIILedger)) {
+	t.Helper()
+	ledger := ReadPIILedger(dir)
+	require.NotNil(t, ledger)
+	mutate(ledger)
+	require.NoError(t, WritePIILedger(dir, ledger))
 }
 
 func scanLine(t *testing.T, line, filename string) []PIIFinding {

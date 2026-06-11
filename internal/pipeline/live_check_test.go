@@ -2,12 +2,14 @@ package pipeline
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/mvanhorn/cli-printing-press/v4/internal/platform"
 	"github.com/stretchr/testify/assert"
@@ -37,6 +39,33 @@ func writeTestResearchJSON(t *testing.T, cliDir string, features []NovelFeature)
 	body, err := json.Marshal(data)
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(filepath.Join(cliDir, "research.json"), body, 0o644))
+}
+
+func writeNovelCommandFile(t *testing.T, cliDir, name, body string) {
+	t.Helper()
+	path := filepath.Join(cliDir, "internal", "cli", name)
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+	require.NoError(t, os.WriteFile(path, []byte(body), 0o644))
+}
+
+func writeLiveCheckGoCLI(t *testing.T, cliDir, binaryName, output string) string {
+	t.Helper()
+	require.NoError(t, os.WriteFile(filepath.Join(cliDir, "go.mod"), []byte("module example.com/live-check-test\n\ngo 1.23\n"), 0o644))
+	cmdDir := filepath.Join(cliDir, "cmd", binaryName)
+	require.NoError(t, os.MkdirAll(cmdDir, 0o755))
+	mainPath := filepath.Join(cmdDir, "main.go")
+	mainSource := fmt.Sprintf(`package main
+
+import (
+	"fmt"
+)
+
+func main() {
+	fmt.Println(%q)
+}
+`, output)
+	require.NoError(t, os.WriteFile(mainPath, []byte(mainSource), 0o644))
+	return mainPath
 }
 
 // TestLiveCheck_UnableWhenNoResearch verifies the check gracefully reports
@@ -275,6 +304,111 @@ func TestLiveCheck_FailOnExitError(t *testing.T) {
 	require.Contains(t, result.Features[0].Reason, "exit 5")
 }
 
+func TestLiveCheck_LocalDataSourceUnsyncedFailureSkipsAndExcludesPassRate(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		stderr string
+	}{
+		{
+			name:   "sqlite open failure",
+			stderr: "Error: querying tasks: unable to open database file: out of memory (14)",
+		},
+		{
+			name:   "missing db file",
+			stderr: "Error: querying tasks: open /tmp/tasks.db: no such file or directory",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeNovelCommandFile(t, dir, "tasks.go", `package cli
+
+// pp:data-source local
+func newNovelTasksCmd() *cobra.Command {
+	return &cobra.Command{Use: "tasks"}
+}
+`)
+			writeStubBinary(t, dir, "stub", fmt.Sprintf("echo %q >&2; exit 1", tc.stderr))
+			writeTestResearchJSON(t, dir, []NovelFeature{
+				{Name: "Tasks", Command: "tasks", Example: `stub tasks --json`},
+			})
+
+			result := RunLiveCheck(LiveCheckOptions{CLIDir: dir, BinaryName: "stub", Timeout: 5 * time.Second})
+
+			require.False(t, result.Unable, "result was Unable: %s", result.Reason)
+			require.Equal(t, 1, result.Checked())
+			require.Zero(t, result.Evaluated(), "skipped local prerequisites must not count in pass-rate denominator")
+			require.Zero(t, result.Failed)
+			require.Equal(t, 1, result.Skipped)
+			require.Equal(t, StatusPrerequisiteUnsynced, result.Features[0].Status)
+			require.Contains(t, result.Features[0].Reason, "prerequisite_unsynced")
+			require.Nil(t, InsightCapFromLiveCheck(result), "all-skipped live-check should not cap scorecard Insight")
+		})
+	}
+}
+
+func TestLiveCheck_LocalDataSourceStrategyDoesNotLeakFromNestedLeaf(t *testing.T) {
+	dir := t.TempDir()
+	writeNovelCommandFile(t, dir, "tasks.go", `package cli
+
+// pp:data-source local
+func newNovelTasksCmd() *cobra.Command {
+	cmd := &cobra.Command{Use: "tasks"}
+	cmd.AddCommand(&cobra.Command{Use: "list"})
+	return cmd
+}
+`)
+	writeStubBinary(t, dir, "stub", `echo "Error: querying projects: unable to open database file: out of memory (14)" >&2; exit 1`)
+	writeTestResearchJSON(t, dir, []NovelFeature{
+		{Name: "Project list", Command: "projects list", Example: `stub projects list --json`},
+	})
+
+	result := RunLiveCheck(LiveCheckOptions{CLIDir: dir, BinaryName: "stub", Timeout: 5 * time.Second})
+
+	require.False(t, result.Unable, "result was Unable: %s", result.Reason)
+	require.Equal(t, 1, result.Checked())
+	require.Equal(t, 1, result.Evaluated())
+	require.Equal(t, 1, result.Failed)
+	require.Zero(t, result.Skipped)
+	require.Equal(t, StatusFail, result.Features[0].Status)
+	require.NotContains(t, result.Features[0].Reason, "prerequisite_unsynced")
+}
+
+func TestLiveCheck_LocalDataSourceRealFailureStillFails(t *testing.T) {
+	dir := t.TempDir()
+	writeNovelCommandFile(t, dir, "tasks.go", `package cli
+
+// pp:data-source local
+func newNovelTasksCmd() *cobra.Command {
+	return &cobra.Command{Use: "tasks"}
+}
+`)
+	writeStubBinary(t, dir, "stub", `echo "Error: querying tasks: invalid aggregation column" >&2; exit 1`)
+	writeTestResearchJSON(t, dir, []NovelFeature{
+		{Name: "Tasks", Command: "tasks", Example: `stub tasks --json`},
+	})
+
+	result := RunLiveCheck(LiveCheckOptions{CLIDir: dir, BinaryName: "stub", Timeout: 5 * time.Second})
+
+	require.Equal(t, 1, result.Checked())
+	require.Equal(t, 1, result.Evaluated())
+	require.Equal(t, 1, result.Failed)
+	require.Zero(t, result.Skipped)
+	require.Equal(t, StatusFail, result.Features[0].Status)
+	require.Contains(t, result.Features[0].Reason, "invalid aggregation column")
+}
+
+func TestLiveCheck_PassRateExcludesSkippedSamples(t *testing.T) {
+	result := &LiveCheckResult{Passed: 1, Failed: 1, Skipped: 8}
+
+	require.Equal(t, 10, result.Checked())
+	require.Equal(t, 2, result.Evaluated())
+
+	if total := result.Evaluated(); total > 0 {
+		result.PassRate = float64(result.Passed) / float64(total)
+	}
+	require.Equal(t, 0.5, result.PassRate)
+}
+
 // TestLiveCheck_FailOnEmptyOutput ensures stdout must be non-empty.
 func TestLiveCheck_FailOnEmptyOutput(t *testing.T) {
 	dir := t.TempDir()
@@ -418,6 +552,7 @@ func TestLiveCheckMarshalJSON(t *testing.T) {
 	body, err := json.Marshal(r)
 	require.NoError(t, err)
 	require.Contains(t, string(body), `"pass_rate_pct":67`)
+	require.Contains(t, string(body), `"evaluated":2`)
 	require.NotContains(t, string(body), "0.6666")
 }
 
@@ -476,18 +611,65 @@ esac
 }
 
 // TestLiveCheck_OutputCap guards against OOM from a runaway feature that
-// streams megabytes of output. The cap is MaxOutputBytes (1 MiB); the test
-// writes 2 MiB so the limitedWriter has to truncate without blowing up the
-// process. The Example has only one positional so no relevance check fires
-// against the (mostly 'x') output.
+// streams megabytes of output. The test writes past MaxOutputBytes so the
+// limitedWriter has to truncate without blowing up the process. The Example
+// has only one positional so no relevance check fires against the output.
 func TestLiveCheck_OutputCap(t *testing.T) {
 	dir := t.TempDir()
-	writeStubBinary(t, dir, "stub", `head -c 2097152 /dev/zero | tr '\0' 'x'`)
+	writeStubBinary(t, dir, "stub", fmt.Sprintf(`head -c %d /dev/zero | tr '\0' 'x'`, MaxOutputBytes+1024))
 	writeTestResearchJSON(t, dir, []NovelFeature{
 		{Name: "Noisy", Command: "n", Example: `stub n`},
 	})
 	result := RunLiveCheck(LiveCheckOptions{CLIDir: dir, BinaryName: "stub", Timeout: 10 * time.Second})
 	require.Equal(t, 1, result.Passed, "run should complete despite bounded output")
+}
+
+func TestLiveCheck_OutputSampleRedactsPII(t *testing.T) {
+	got := sampleOutput(`{"name":"Jane Doe","email":"jane@gmail.com","address":"123 Main Street","id":42,"status":"active"}`)
+
+	require.NotContains(t, got, "Jane Doe")
+	require.NotContains(t, got, "jane@gmail.com")
+	require.NotContains(t, got, "123 Main Street")
+	require.Contains(t, got, `"name":"<redacted>"`)
+	require.Contains(t, got, `"email":"<redacted>"`)
+	require.Contains(t, got, `"address":"<redacted>"`)
+	require.Contains(t, got, `"id":42`)
+	require.Contains(t, got, `"status":"active"`)
+}
+
+func TestLiveCheck_OutputSampleLeavesStructuralJSONUnchanged(t *testing.T) {
+	input := `{"id":42,"status":"active"}`
+
+	require.Equal(t, input, sampleOutput(input))
+}
+
+func TestLiveCheck_OutputSampleRedactsPIIBeforeTruncatingJSON(t *testing.T) {
+	longNote := strings.Repeat("x", outputSampleMaxBytes)
+	got := sampleOutput(fmt.Sprintf(`{"name":"Jane Doe","email":"jane@gmail.com","note":%q}`, longNote))
+
+	require.Contains(t, got, "…[truncated]")
+	require.NotContains(t, got, "Jane Doe")
+	require.NotContains(t, got, "jane@gmail.com")
+	require.Contains(t, got, `"name":"<redacted>"`)
+	require.Contains(t, got, `"email":"<redacted>"`)
+}
+
+func TestLiveCheck_OutputSampleRedactsNDJSONAndMixedParts(t *testing.T) {
+	got := sampleOutputParts("{\"name\":\"Jane Doe\"}\n", "{\"invoice_number\":\"INV-12345\"}")
+
+	require.NotContains(t, got, "Jane Doe")
+	require.NotContains(t, got, "INV-12345")
+	require.Contains(t, got, `"name":"<redacted>"`)
+	require.Contains(t, got, `"invoice_number":"<redacted>"`)
+}
+
+func TestLiveCheck_OutputSampleRedactsPIIAcrossTruncationBoundary(t *testing.T) {
+	got := sampleOutput(strings.Repeat("x", outputSampleMaxBytes-8) + " jane@gmail.com")
+
+	require.Contains(t, got, "…[truncated]")
+	require.NotContains(t, got, "jane@gmail.com")
+	require.NotContains(t, got, "jane@")
+	require.Contains(t, got, "<redacted>")
 }
 
 // TestLiveCheck_BinaryAutoDerivation verifies RunLiveCheck finds the binary
@@ -631,15 +813,33 @@ func TestLiveCheckResolveBinaryPathSkipsNonExecutableCandidate(t *testing.T) {
 	require.Equal(t, filepath.Clean(rootPath), got)
 }
 
-func TestLiveCheckExecutableHonorsWindowsExeExtension(t *testing.T) {
+func TestLiveCheckResolveBinaryPathAcceptsWindowsExtensionlessCandidate(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	stagedDir := filepath.Join(dir, "build", "stage", "bin")
+	require.NoError(t, os.MkdirAll(stagedDir, 0o755))
+
+	stagedPath := filepath.Join(stagedDir, "stub")
+	require.NoError(t, os.WriteFile(stagedPath, []byte("windows binary"), 0o644))
+
+	got, err := resolveBinaryPathForGOOS(dir, "stub", "windows")
+	require.NoError(t, err)
+	require.Equal(t, filepath.Clean(stagedPath), got)
+}
+
+func TestLiveCheckExecutableUsesHostExecutableRules(t *testing.T) {
 	t.Parallel()
 
 	assert.True(t,
 		isLiveCheckExecutableForGOOS(`C:\tmp\petstore-pp-cli.exe`, 0o644, "windows"),
-		"Windows executability is extension-based, not POSIX mode-bit-based")
-	assert.False(t,
+		"Windows executability is path-based, not POSIX mode-bit-based")
+	assert.True(t,
 		isLiveCheckExecutableForGOOS(`C:\tmp\petstore-pp-cli`, 0o755, "windows"),
-		"Windows live-check should only accept .exe binaries")
+		"Windows live-check should skip POSIX executable-bit checks")
+	assert.False(t,
+		isLiveCheckExecutableForGOOS(`C:\tmp\petstore-pp-cli`, os.ModeDir|0o755, "windows"),
+		"Windows live-check should still reject directories")
 	assert.True(t,
 		isLiveCheckExecutableForGOOS("/tmp/petstore-pp-cli", 0o755, "linux"),
 		"Unix live-check should keep honoring executable bits")
@@ -669,6 +869,193 @@ func TestLiveCheck_FindsBinaryInBuildStageBin(t *testing.T) {
 	assert.Equal(t, 1, result.Passed, "expected binary at build/stage/bin/ to be found and run")
 }
 
+func TestLiveCheck_RebuildsStaleStageBinaryBeforeSampling(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-script stub not supported on Windows")
+	}
+
+	dir := t.TempDir()
+	binaryName := "sample-pp-cli"
+	stagedBinDir := filepath.Join(dir, "build", "stage", "bin")
+	require.NoError(t, os.MkdirAll(stagedBinDir, 0o755))
+	stub := filepath.Join(stagedBinDir, binaryName)
+	require.NoError(t, os.WriteFile(stub, []byte("#!/bin/sh\necho 'unknown command \"foo\"' >&2\nexit 2\n"), 0o755))
+	oldTime := time.Now().Add(-2 * time.Hour)
+	require.NoError(t, os.Chtimes(stub, oldTime, oldTime))
+
+	writeLiveCheckGoCLI(t, dir, binaryName, `{"data":[{"source":"rebuilt"}]}`)
+	writeTestResearchJSON(t, dir, []NovelFeature{
+		{Name: "Foo", Command: "foo", Example: binaryName + " foo --json"},
+	})
+
+	result := RunLiveCheck(LiveCheckOptions{CLIDir: dir, BinaryName: binaryName, Timeout: 5 * time.Second})
+	require.False(t, result.Unable, "check was Unable: %s", result.Reason)
+	require.Equal(t, 1, result.Passed)
+	require.Contains(t, result.Features[0].OutputSample, "rebuilt")
+	require.NotNil(t, result.BinaryRefresh)
+	require.Equal(t, "rebuilt", result.BinaryRefresh.Action)
+}
+
+func TestLiveCheck_SkipsStageRebuildWhenBinaryIsFresh(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-script stub not supported on Windows")
+	}
+
+	dir := t.TempDir()
+	binaryName := "sample-pp-cli"
+	mainPath := writeLiveCheckGoCLI(t, dir, binaryName, `{"data":[{"source":"rebuilt"}]}`)
+	oldTime := time.Now().Add(-2 * time.Hour)
+	require.NoError(t, os.Chtimes(mainPath, oldTime, oldTime))
+
+	stagedBinDir := filepath.Join(dir, "build", "stage", "bin")
+	require.NoError(t, os.MkdirAll(stagedBinDir, 0o755))
+	stub := filepath.Join(stagedBinDir, binaryName)
+	require.NoError(t, os.WriteFile(stub, []byte("#!/bin/sh\necho '{\"data\":[{\"source\":\"fresh-stage\"}]}'\n"), 0o755))
+	require.NoError(t, os.Chtimes(stub, time.Now(), time.Now()))
+	writeTestResearchJSON(t, dir, []NovelFeature{
+		{Name: "Foo", Command: "foo", Example: binaryName + " foo --json"},
+	})
+
+	result := RunLiveCheck(LiveCheckOptions{CLIDir: dir, BinaryName: binaryName, Timeout: 5 * time.Second})
+	require.False(t, result.Unable, "check was Unable: %s", result.Reason)
+	require.Equal(t, 1, result.Passed)
+	require.Contains(t, result.Features[0].OutputSample, "fresh-stage")
+	require.NotContains(t, result.Features[0].OutputSample, "rebuilt")
+	require.NotNil(t, result.BinaryRefresh)
+	require.Equal(t, "fresh", result.BinaryRefresh.Action)
+}
+
+func TestLiveCheck_SkipsStageRebuildWhenFreshFallbackBinaryExists(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-script stub not supported on Windows")
+	}
+
+	dir := t.TempDir()
+	binaryName := "sample-pp-cli"
+	mainPath := writeLiveCheckGoCLI(t, dir, binaryName, `{"data":[{"source":"rebuilt"}]}`)
+	sourceTime := time.Now().Add(-1 * time.Hour)
+	require.NoError(t, os.Chtimes(mainPath, sourceTime, sourceTime))
+
+	stagedBinDir := filepath.Join(dir, "build", "stage", "bin")
+	require.NoError(t, os.MkdirAll(stagedBinDir, 0o755))
+	stub := filepath.Join(stagedBinDir, binaryName)
+	require.NoError(t, os.WriteFile(stub, []byte("#!/bin/sh\necho 'unknown command \"foo\"' >&2\nexit 2\n"), 0o755))
+	oldTime := time.Now().Add(-2 * time.Hour)
+	require.NoError(t, os.Chtimes(stub, oldTime, oldTime))
+	writeStubBinary(t, dir, binaryName, `echo '{"data":[{"source":"fresh-root"}]}'`)
+	writeTestResearchJSON(t, dir, []NovelFeature{
+		{Name: "Foo", Command: "foo", Example: binaryName + " foo --json"},
+	})
+
+	result := RunLiveCheck(LiveCheckOptions{CLIDir: dir, BinaryName: binaryName, Timeout: 5 * time.Second})
+	require.False(t, result.Unable, "check was Unable: %s", result.Reason)
+	require.Equal(t, 1, result.Passed)
+	require.Contains(t, result.Features[0].OutputSample, "fresh-root")
+	require.NotContains(t, result.Features[0].OutputSample, "rebuilt")
+	require.NotNil(t, result.BinaryRefresh)
+	require.Equal(t, "fresh_fallback", result.BinaryRefresh.Action)
+}
+
+func TestLiveCheck_RebuildsPreferredStageBinaryDespiteFreshLowerPriorityFallback(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-script stub not supported on Windows")
+	}
+
+	dir := filepath.Join(t.TempDir(), "sample")
+	require.NoError(t, os.MkdirAll(dir, 0o755))
+	sourceName := "sample-pp-cli"
+	mainPath := writeLiveCheckGoCLI(t, dir, sourceName, `{"data":[{"source":"rebuilt"}]}`)
+	sourceTime := time.Now().Add(-1 * time.Hour)
+	require.NoError(t, os.Chtimes(mainPath, sourceTime, sourceTime))
+
+	stagedBinDir := filepath.Join(dir, "build", "stage", "bin")
+	require.NoError(t, os.MkdirAll(stagedBinDir, 0o755))
+	stub := filepath.Join(stagedBinDir, sourceName)
+	require.NoError(t, os.WriteFile(stub, []byte("#!/bin/sh\necho 'unknown command \"foo\"' >&2\nexit 2\n"), 0o755))
+	oldTime := time.Now().Add(-2 * time.Hour)
+	require.NoError(t, os.Chtimes(stub, oldTime, oldTime))
+	writeStubBinary(t, dir, "sample", `echo '{"data":[{"source":"fresh-root"}]}'`)
+	writeTestResearchJSON(t, dir, []NovelFeature{
+		{Name: "Foo", Command: "foo", Example: sourceName + " foo --json"},
+	})
+
+	result := RunLiveCheck(LiveCheckOptions{CLIDir: dir, Timeout: 5 * time.Second})
+	require.False(t, result.Unable, "check was Unable: %s", result.Reason)
+	require.Equal(t, 1, result.Passed)
+	require.Contains(t, result.Features[0].OutputSample, "rebuilt")
+	require.NotContains(t, result.Features[0].OutputSample, "fresh-root")
+	require.NotNil(t, result.BinaryRefresh)
+	require.Equal(t, "rebuilt", result.BinaryRefresh.Action)
+}
+
+func TestLiveCheck_RebuildsStageBinaryWhenInternalSourceIsNewer(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-script stub not supported on Windows")
+	}
+
+	dir := t.TempDir()
+	binaryName := "sample-pp-cli"
+	mainPath := writeLiveCheckGoCLI(t, dir, binaryName, `{"data":[{"source":"rebuilt"}]}`)
+	oldTime := time.Now().Add(-2 * time.Hour)
+	require.NoError(t, os.Chtimes(mainPath, oldTime, oldTime))
+
+	stagedBinDir := filepath.Join(dir, "build", "stage", "bin")
+	require.NoError(t, os.MkdirAll(stagedBinDir, 0o755))
+	stub := filepath.Join(stagedBinDir, binaryName)
+	require.NoError(t, os.WriteFile(stub, []byte("#!/bin/sh\necho 'unknown command \"foo\"' >&2\nexit 2\n"), 0o755))
+	stageTime := time.Now().Add(-1 * time.Hour)
+	require.NoError(t, os.Chtimes(stub, stageTime, stageTime))
+
+	internalPath := filepath.Join(dir, "internal", "cli", "foo.go")
+	require.NoError(t, os.MkdirAll(filepath.Dir(internalPath), 0o755))
+	require.NoError(t, os.WriteFile(internalPath, []byte("package cli\n"), 0o644))
+	writeTestResearchJSON(t, dir, []NovelFeature{
+		{Name: "Foo", Command: "foo", Example: binaryName + " foo --json"},
+	})
+
+	result := RunLiveCheck(LiveCheckOptions{CLIDir: dir, BinaryName: binaryName, Timeout: 5 * time.Second})
+	require.False(t, result.Unable, "check was Unable: %s", result.Reason)
+	require.Equal(t, 1, result.Passed)
+	require.Contains(t, result.Features[0].OutputSample, "rebuilt")
+	require.NotNil(t, result.BinaryRefresh)
+	require.Equal(t, "rebuilt", result.BinaryRefresh.Action)
+}
+
+func TestLiveCheck_BinaryRefreshReasonIncludesSourceWalkError(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("chmod permission behavior differs on Windows")
+	}
+
+	dir := filepath.Join(t.TempDir(), "sample-pp-cli")
+	require.NoError(t, os.MkdirAll(dir, 0o755))
+	binaryName := "sample-pp-cli"
+	writeLiveCheckGoCLI(t, dir, binaryName, `{"data":[{"source":"rebuilt"}]}`)
+
+	blockedDir := filepath.Join(dir, "cmd", binaryName, "blocked")
+	require.NoError(t, os.MkdirAll(blockedDir, 0o755))
+	require.NoError(t, os.Chmod(blockedDir, 0))
+	t.Cleanup(func() {
+		_ = os.Chmod(blockedDir, 0o755)
+	})
+
+	stagedBinDir := filepath.Join(dir, "build", "stage", "bin")
+	require.NoError(t, os.MkdirAll(stagedBinDir, 0o755))
+	stub := filepath.Join(stagedBinDir, binaryName)
+	require.NoError(t, os.WriteFile(stub, []byte("#!/bin/sh\necho '{\"data\":[{\"source\":\"stale\"}]}'\n"), 0o755))
+	oldTime := time.Now().Add(-2 * time.Hour)
+	require.NoError(t, os.Chtimes(stub, oldTime, oldTime))
+	writeTestResearchJSON(t, dir, []NovelFeature{
+		{Name: "Foo", Command: "foo", Example: binaryName + " foo --json"},
+	})
+
+	result := RunLiveCheck(LiveCheckOptions{CLIDir: dir, BinaryName: binaryName, Timeout: 5 * time.Second})
+	require.True(t, result.Unable)
+	require.NotNil(t, result.BinaryRefresh)
+	require.Equal(t, "failed", result.BinaryRefresh.Action)
+	require.NotEmpty(t, result.BinaryRefresh.Reason)
+	require.Contains(t, result.Reason, result.BinaryRefresh.Reason)
+}
+
 func TestLiveCheckBinaryCandidatesIncludeHostExecutableName(t *testing.T) {
 	t.Parallel()
 
@@ -696,6 +1083,22 @@ func TestChecked_DerivedFromCounters(t *testing.T) {
 	// Also: nil receiver must not panic.
 	var nilRes *LiveCheckResult
 	require.Zero(t, nilRes.Checked())
+}
+
+func TestEvaluated_ExcludesSkippedCounters(t *testing.T) {
+	cases := []struct {
+		r    LiveCheckResult
+		want int
+	}{
+		{LiveCheckResult{}, 0},
+		{LiveCheckResult{Passed: 3}, 3},
+		{LiveCheckResult{Passed: 1, Failed: 2, Skipped: 3}, 3},
+	}
+	for _, tc := range cases {
+		require.Equal(t, tc.want, tc.r.Evaluated())
+	}
+	var nilRes *LiveCheckResult
+	require.Zero(t, nilRes.Evaluated())
 }
 
 // --- detectRawHTMLEntities (Wave B / R3) ---
@@ -820,6 +1223,33 @@ printf 'Hello cookie world\n'
 	require.Contains(t, result.OutputSample, "Hello cookie world")
 }
 
+func TestRunOneFeatureCheck_RedactsPIIFromFailureReason(t *testing.T) {
+	binary := buildFakeCLI(t, `#!/usr/bin/env bash
+printf '{"name":"Jane Doe","email":"jane@gmail.com"}' >&2
+exit 7
+`)
+	feature := NovelFeature{
+		Name:    "demo",
+		Command: "demo",
+		Example: "bin demo",
+	}
+	result := runOneFeatureCheck(t.TempDir(), binary, feature, 5*time.Second)
+
+	require.Equal(t, StatusFail, result.Status)
+	require.NotContains(t, result.Reason, "Jane Doe")
+	require.NotContains(t, result.Reason, "jane@gmail.com")
+	require.Contains(t, result.Reason, `"name":"<redacted>"`)
+	require.Contains(t, result.Reason, `"email":"<redacted>"`)
+}
+
+func TestTrimOutput_RedactsPIIBeforeTruncatingFailureReason(t *testing.T) {
+	got := trimOutput(strings.Repeat("x", 290) + " jane@gmail.com")
+
+	require.NotContains(t, got, "jane@")
+	require.NotContains(t, got, "gmail.com")
+	require.Contains(t, got, "<redacted")
+}
+
 func TestSampleOutput_TruncatesLargeCapture(t *testing.T) {
 	// Guard the serialized-sample size so one feature can't bloat the
 	// scorecard JSON or overwhelm an agentic reviewer's context window.
@@ -827,6 +1257,30 @@ func TestSampleOutput_TruncatesLargeCapture(t *testing.T) {
 	got := sampleOutput(big)
 	require.Contains(t, got, "…[truncated]", "truncation marker missing")
 	require.LessOrEqual(t, len(got), outputSampleMaxBytes+len("…[truncated]"))
+}
+
+func TestSampleOutput_TruncatesUTF8Safely(t *testing.T) {
+	got := sampleOutput(strings.Repeat("a", outputSampleMaxBytes-1) + "é")
+
+	require.Contains(t, got, "…[truncated]")
+	require.NotContains(t, got, "\uFFFD")
+	require.True(t, utf8.ValidString(got))
+}
+
+func TestTruncateUTF8_PreservesPrefixWithEarlierInvalidByte(t *testing.T) {
+	input := "prefix" + string([]byte{0xff}) + strings.Repeat("a", 32) + "é"
+	got := truncateUTF8(input, len(input)-1)
+
+	require.Contains(t, got, string([]byte{0xff}))
+	require.Contains(t, got, strings.Repeat("a", 32))
+	require.NotContains(t, got, "é")
+	require.Greater(t, len(got), 30)
+}
+
+func TestSampleOutputParts_TruncatesWithoutConcatenatingFullCapture(t *testing.T) {
+	prefix := strings.Repeat("a", outputSampleMaxBytes-2)
+	got := sampleOutputParts(prefix, "bc", strings.Repeat("d", outputSampleMaxBytes))
+	require.Equal(t, prefix+"bc"+"…[truncated]", got)
 }
 
 func TestSampleOutput_ShortCapturePassesThrough(t *testing.T) {

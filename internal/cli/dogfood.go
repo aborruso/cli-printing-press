@@ -23,6 +23,7 @@ func newDogfoodCmd() *cobra.Command {
 	var timeout time.Duration
 	var writeAcceptance string
 	var authEnv string
+	var authTier string
 	var allowDestructive bool
 
 	cmd := &cobra.Command{
@@ -42,6 +43,7 @@ func newDogfoodCmd() *cobra.Command {
 					Timeout:             timeout,
 					WriteAcceptancePath: writeAcceptance,
 					AuthEnv:             authEnv,
+					AuthTier:            authTier,
 					AllowDestructive:    allowDestructive,
 				})
 				if err != nil {
@@ -56,7 +58,9 @@ func newDogfoodCmd() *cobra.Command {
 				} else {
 					printLiveDogfoodReport(report)
 				}
-				if report.Verdict != "PASS" {
+				// Device CLIs report "unverified-device" (manual --live testing is
+				// their real gate); only a hard FAIL is a non-zero exit.
+				if report.Verdict == "FAIL" {
 					return &ExitError{Code: ExitGenerationError, Err: fmt.Errorf("live dogfood failed: %d/%d tests failed", report.Failed, report.MatrixSize)}
 				}
 				return nil
@@ -95,6 +99,7 @@ func newDogfoodCmd() *cobra.Command {
 	cmd.Flags().DurationVar(&timeout, "timeout", 30*time.Second, "Timeout for each live dogfood test")
 	cmd.Flags().StringVar(&writeAcceptance, "write-acceptance", "", "Write phase5-acceptance.json to this path on every outcome (status:pass on success, status:fail with a failure_summary block on failure)")
 	cmd.Flags().StringVar(&authEnv, "auth-env", "", "Environment variable that proves an API credential was available for the acceptance marker")
+	cmd.Flags().StringVar(&authTier, "auth-tier", "", "Credential tier for live dogfood; falls back to PP_AUTH_TIER and skips commands annotated pp:requires-tier on mismatch")
 	cmd.Flags().BoolVar(&allowDestructive, "allow-destructive", false, "Re-enable testing of endpoints classified as destructive-at-auth. Default skips them to prevent runner-credential rotation.")
 	_ = cmd.MarkFlagRequired("dir")
 	return cmd
@@ -269,12 +274,15 @@ func printDogfoodReport(report *pipeline.DogfoodReport) {
 		fmt.Println("Novel Features:    SKIP (none planned)")
 	} else {
 		nfStatus := "PASS"
-		if len(nfc.Missing) > 0 {
+		if len(nfc.Missing) > 0 || len(nfc.DepthMismatches) > 0 {
 			nfStatus = "WARN"
 		}
 		fmt.Printf("Novel Features:    %d/%d survived (%s)\n", nfc.Found, nfc.Planned, nfStatus)
 		for _, cmd := range nfc.Missing {
 			fmt.Printf("  - %s: planned but not found\n", cmd)
+		}
+		for _, mismatch := range nfc.DepthMismatches {
+			fmt.Printf("  - %s: advertised as %q but registered as %q\n", mismatch.Command, mismatch.Advertised, mismatch.Actual)
 		}
 	}
 	fmt.Println()

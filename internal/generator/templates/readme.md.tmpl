@@ -1,5 +1,6 @@
 # {{.ProseName}} CLI
 {{- $canonicalEnvVar := .Auth.CanonicalEnvVar}}
+{{- $deviceEnvVars := deviceCodeEnvVars .Auth}}
 {{- if and .Narrative .Narrative.Headline}}
 
 **{{.Narrative.Headline}}**
@@ -15,9 +16,12 @@
 
 Learn more at [{{.ProseName}}]({{.WebsiteURL}}).
 {{- end}}
-{{- if .Printer}}
+{{- if .Creator.Handle}}
 
-Printed by [@{{.Printer}}](https://github.com/{{.Printer}}){{if .PrinterName}} ({{.PrinterName}}){{end}}.
+Created by [@{{.Creator.Handle}}](https://github.com/{{.Creator.Handle}}){{if .Creator.Name}} ({{.Creator.Name}}){{end}}.
+{{- if .Contributors}}
+Contributors: {{range $i, $c := .Contributors}}{{if $i}}, {{end}}{{if $c.Handle}}[@{{$c.Handle}}](https://github.com/{{$c.Handle}}){{if $c.Name}} ({{$c.Name}}){{end}}{{else}}{{$c.Name}}{{end}}{{end}}.
+{{- end}}
 {{- end}}
 
 ## Install
@@ -49,7 +53,7 @@ npx -y @mvanhorn/printing-press-library install {{.Name}} --agent claude-code --
 {{ if .Category}}
 ### Without Node (Go fallback)
 
-If `npx` isn't available (no Node, offline), install the CLI directly via Go (requires Go 1.26.3 or newer):
+If `npx` isn't available (no Node, offline), install the CLI directly via Go (requires Go 1.26.4 or newer):
 
 ```bash
 go install github.com/mvanhorn/printing-press-library/library/{{.Category}}/{{.Name}}/cmd/{{.Name}}-pp-cli@latest
@@ -69,6 +73,14 @@ Download a pre-built binary for your platform from the [latest release](https://
 <!-- pp-hermes-install-anchor -->
 ## Install for Hermes
 
+Install the CLI binary first. The installer writes binaries to a per-user managed bin directory by default: `$HOME/.local/bin` on macOS/Linux and `%LOCALAPPDATA%\Programs\PrintingPress\bin` on Windows.
+
+```bash
+npx -y @mvanhorn/printing-press-library install {{.Name}} --cli-only
+```
+
+Then install the focused Hermes skill.
+
 From the Hermes CLI:
 
 ```bash
@@ -81,13 +93,16 @@ Inside a Hermes chat session:
 /skills install mvanhorn/printing-press-library/cli-skills/pp-{{.Name}} --force
 ```
 
+Restart the Hermes session or gateway if the newly installed skill is not visible immediately.
+
 ## Install for OpenClaw
+Install both the CLI binary and the focused OpenClaw skill. The installer defaults binaries to a per-user bin directory (`$HOME/.local/bin` on macOS/Linux, `%LOCALAPPDATA%\Programs\PrintingPress\bin` on Windows):
 
-Tell your OpenClaw agent (copy this):
+```bash
+npx -y @mvanhorn/printing-press-library install {{.Name}} --agent openclaw
+```
 
-```
-Install the pp-{{.Name}} skill from https://github.com/mvanhorn/printing-press-library/tree/main/cli-skills/pp-{{.Name}}. The skill defines how its required CLI can be installed.
-```
+Restart the OpenClaw session or gateway if the newly installed skill is not visible immediately.
 
 ## Use with Claude Desktop
 
@@ -99,12 +114,33 @@ The bundle reuses your local browser session — set it up first if you haven't:
 ```bash
 {{.Name}}-pp-cli auth login --chrome
 ```
+{{- else if eq .Auth.EffectiveOAuth2Grant "device_code"}}
+
+The bundle reuses your local OAuth tokens — authenticate first if you haven't:
+
+```bash
+{{- if or .Auth.DefaultClientID (not $deviceEnvVars)}}
+{{.Name}}-pp-cli auth login --device-code
+{{- else}}
+export {{(index $deviceEnvVars 0).Name}}=<client-id>
+{{.Name}}-pp-cli auth login --device-code
+{{- end}}
+```
 {{- else if eq .Auth.Type "oauth2"}}
 
 The bundle reuses your local OAuth tokens — authenticate first if you haven't:
 
 ```bash
 {{.Name}}-pp-cli auth login
+```
+{{- else if eq .Auth.Type "oauth2_refresh"}}
+
+The bundle reuses your local OAuth2 refresh-token credentials — configure them first if you haven't:
+
+```bash
+{{- range .Auth.EnvVarSpecs}}
+export {{.Name}}="{{authEnvPlaceholder .}}"
+{{- end}}
 ```
 {{- else if and (eq .Auth.Type "bearer_token") (not $canonicalEnvVar)}}
 
@@ -208,6 +244,22 @@ export {{.Name}}="<paste-your-key>"
 
 You can also persist this in your config file at `{{$.Config.Path}}`.
 {{- end}}
+{{- else if eq .Auth.EffectiveOAuth2Grant "device_code"}}
+
+### 2. Authenticate
+
+Authorize with the OAuth2 device-code flow:
+
+```bash
+{{- if or .Auth.DefaultClientID (not $deviceEnvVars)}}
+{{.Name}}-pp-cli auth login --device-code
+{{- else}}
+export {{(index $deviceEnvVars 0).Name}}=<client-id>
+{{.Name}}-pp-cli auth login --device-code
+{{- end}}
+```
+
+Open the verification URL, enter the printed user code, and return to the CLI. Your tokens are stored locally and refreshed automatically.
 {{- else if eq .Auth.Type "oauth2"}}
 
 ### 2. Authenticate
@@ -219,6 +271,17 @@ Authorize via your browser:
 ```
 
 This opens a browser window to complete the OAuth2 flow. Your tokens are stored locally and refreshed automatically.
+{{- else if eq .Auth.Type "oauth2_refresh"}}
+
+### 2. Set Up OAuth2 Refresh Credentials
+
+This CLI uses OAuth2 with refresh-token rotation. Provide the client credentials and refresh token; access tokens are refreshed automatically.
+
+```bash
+{{- range .Auth.EnvVarSpecs}}
+export {{.Name}}="{{authEnvPlaceholder .}}"
+{{- end}}
+```
 {{- else if eq .Auth.Type "bearer_token"}}
 
 ### 2. Set Up Credentials
@@ -323,6 +386,22 @@ These capabilities aren't available in any other tool for this API.
 {{- end}}
 {{- end}}
 {{- end}}
+{{- if and .Narrative .Narrative.Recipes}}
+
+## Recipes
+{{range .Narrative.Recipes}}
+
+### {{.Title}}
+
+```bash
+{{.Command}}
+```
+{{- if .Explanation}}
+
+{{.Explanation}}
+{{- end}}
+{{- end}}
+{{- end}}
 
 ## Usage
 
@@ -335,12 +414,27 @@ Run `{{.Name}}-pp-cli --help` for the full command reference and flag list.
 {{$resource.Description}}
 {{range $eName, $endpoint := $resource.Endpoints}}
 {{- if index $.PromotedResourceNames $name}}
-- **`{{$.Name}}-pp-cli {{$name}}{{positionalArgs $endpoint}}`** - {{$endpoint.Description}}
+- **`{{$.Name}}-pp-cli {{kebab $name}}{{positionalArgs $endpoint}}`** - {{$endpoint.Description}}
 {{- else}}
-- **`{{$.Name}}-pp-cli {{$name}} {{kebab $eName}}`** - {{$endpoint.Description}}
+- **`{{$.Name}}-pp-cli {{kebab $name}} {{kebab $eName}}`** - {{$endpoint.Description}}
 {{- end}}
 {{- end}}
 {{end}}
+{{- if .Learn.Enabled}}
+
+### Self-learning loop
+
+This CLI caches per-question discovery so repeat queries skip the walk and structurally similar queries get answered via entity substitution. Agents call `recall` before discovery and fire `teach &` after answering. See the `## Automatic learning` section in `SKILL.md` for the four-branch protocol.
+
+- **`{{$.Name}}-pp-cli recall <query>`** - Look up cached resources for a query before running discovery
+- **`{{$.Name}}-pp-cli teach`** - Record a query -> resource mapping (silent on success, safe to background with `&`)
+- **`{{$.Name}}-pp-cli learnings list`** - Inspect taught rows
+- **`{{$.Name}}-pp-cli learnings forget <query>`** - Undo a teach
+- **`{{$.Name}}-pp-cli teach-pattern`** - Install a query/resource template up front
+- **`{{$.Name}}-pp-cli teach-lookup`** - Add an entity mapping (e.g. country code, team alias) for pattern substitution
+
+Pass `--no-learn` or set `{{envPrefix .Name}}_NO_LEARN=true` to disable the loop for deterministic flows.
+{{- end}}
 
 ## Output Formats
 {{- $example := firstCommandExample .Resources}}
@@ -393,7 +487,7 @@ This CLI is designed for AI agent consumption:
 - **Agent-safe by default** - no colors or formatting unless `--human-friendly` is set
 
 Exit codes: `0` success, `2` usage error, `3` not found{{if .HasAuth}}, `4` auth error{{end}}, `5` API error, `7` rate limited, `10` config error.
-{{- if and .HasDataLayer .Cache.Enabled}}
+{{- if and .HasDataLayer .HasAutoRefresh}}
 
 ## Freshness
 
@@ -459,6 +553,12 @@ Environment variables:
 | `{{.}}` | per_call | Yes |  |
 {{- end}}
 {{- end}}
+{{- end}}
+{{- if hasNonCookieAuth .Auth}}
+
+### agentcookie (optional)
+
+If you use agentcookie to sync secrets across machines, this CLI auto-adopts agentcookie-managed credentials with no extra setup. When the daemon writes to this CLI's config, `{{.Name}}-pp-cli doctor` reports `agentcookie: detected` and `auth-status` labels the source as `agentcookie`. Skip this section if you don't use agentcookie - the CLI works the same as any other.
 {{- end}}
 
 ## Troubleshooting

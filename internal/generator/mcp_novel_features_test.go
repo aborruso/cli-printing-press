@@ -55,17 +55,20 @@ func TestMCPRegistersCobraTreeMirror(t *testing.T) {
 
 	cobratreeCLIPath, err := os.ReadFile(filepath.Join(outputDir, "internal", "mcp", "cobratree", "cli_path.go"))
 	require.NoError(t, err)
-	assert.Contains(t, string(cobratreeCLIPath), `const cliName = "noveltest-pp-cli"`)
+	assert.Contains(t, string(cobratreeCLIPath), `cliExecutableName(runtime.GOOS)`)
 	assert.Contains(t, string(cobratreeCLIPath), `os.Getenv("NOVELTEST_CLI_PATH")`)
 
 	cobratreeShellout, err := os.ReadFile(filepath.Join(outputDir, "internal", "mcp", "cobratree", "shellout.go"))
 	require.NoError(t, err)
 	assert.Contains(t, string(cobratreeShellout), "func shellOutToCLI(")
-	assert.Contains(t, string(cobratreeShellout), "func splitShellArgs(s string)")
+	assert.Contains(t, string(cobratreeShellout), "func SplitShellArgs(s string)")
 
 	root, err := os.ReadFile(filepath.Join(outputDir, "internal", "cli", "root.go"))
 	require.NoError(t, err)
 	assert.Contains(t, string(root), "func RootCmd() *cobra.Command")
+
+	runGoCommand(t, outputDir, "mod", "tidy")
+	runGoCommand(t, outputDir, "test", "./internal/mcp/cobratree", "-run", "TestSplitShellArgs")
 
 	// main.go calls only RegisterTools; RegisterTools owns endpoint tools and
 	// the runtime command mirror.
@@ -218,6 +221,61 @@ func TestFrameworkCommandClassificationIsTopLevelOnly(t *testing.T) {
 }
 `)
 	require.NoError(t, os.WriteFile(filepath.Join(outputDir, "internal", "mcp", "cobratree", "framework_depth_test.go"), []byte(testSrc.String()), 0o644))
+
+	runGoCommandRequired(t, outputDir, "test", "./internal/mcp/cobratree")
+}
+
+func TestMCPCobraTreeSiblingCLIPathUsesWindowsExecutableSuffix(t *testing.T) {
+	t.Parallel()
+
+	apiSpec := minimalSpec("pathcheck")
+	outputDir := filepath.Join(t.TempDir(), "pathcheck-pp-cli")
+	gen := New(apiSpec, outputDir)
+	require.NoError(t, gen.Generate())
+
+	var testSrc strings.Builder
+	testSrc.WriteString(`package cobratree
+
+import (
+	"path/filepath"
+	"testing"
+)
+
+func TestCLIExecutableNameUsesWindowsSuffix(t *testing.T) {
+	if got := cliExecutableName("windows"); got != "pathcheck-pp-cli.exe" {
+		t.Fatalf("cliExecutableName(windows) = %q, want pathcheck-pp-cli.exe", got)
+	}
+	if got := cliExecutableName("linux"); got != "pathcheck-pp-cli" {
+		t.Fatalf("cliExecutableName(linux) = %q, want pathcheck-pp-cli", got)
+	}
+	if got := cliExecutableName("darwin"); got != "pathcheck-pp-cli" {
+		t.Fatalf("cliExecutableName(darwin) = %q, want pathcheck-pp-cli", got)
+	}
+}
+
+func TestSiblingCLICandidatesUseWindowsSuffixThenFallback(t *testing.T) {
+	exePath := filepath.Join("tmp", "bin", "pathcheck-pp-mcp.exe")
+	windowsCandidates := siblingCLICandidates("windows", exePath)
+	if len(windowsCandidates) != 2 {
+		t.Fatalf("windows candidates length = %d, want 2: %#v", len(windowsCandidates), windowsCandidates)
+	}
+	if got, want := filepath.Base(windowsCandidates[0]), "pathcheck-pp-cli.exe"; got != want {
+		t.Fatalf("windows candidates[0] = %q, want %q", got, want)
+	}
+	if got, want := filepath.Base(windowsCandidates[1]), "pathcheck-pp-cli"; got != want {
+		t.Fatalf("windows candidates[1] = %q, want %q", got, want)
+	}
+
+	linuxCandidates := siblingCLICandidates("linux", filepath.Join("tmp", "bin", "pathcheck-pp-mcp"))
+	if len(linuxCandidates) != 1 {
+		t.Fatalf("linux candidates length = %d, want 1: %#v", len(linuxCandidates), linuxCandidates)
+	}
+	if got, want := filepath.Base(linuxCandidates[0]), "pathcheck-pp-cli"; got != want {
+		t.Fatalf("linux candidates[0] = %q, want %q", got, want)
+	}
+}
+`)
+	require.NoError(t, os.WriteFile(filepath.Join(outputDir, "internal", "mcp", "cobratree", "cli_path_extra_test.go"), []byte(testSrc.String()), 0o644))
 
 	runGoCommandRequired(t, outputDir, "test", "./internal/mcp/cobratree")
 }

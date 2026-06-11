@@ -10,7 +10,6 @@ import (
 
 	"github.com/mvanhorn/cli-printing-press/v4/internal/naming"
 	"github.com/mvanhorn/cli-printing-press/v4/internal/spec"
-	"github.com/mvanhorn/cli-printing-press/v4/internal/version"
 )
 
 // MCPB-bundle constants. Promoted from string literals so a typo here can't
@@ -20,9 +19,10 @@ const (
 	mcpbServerTypeBinary = "binary"
 	mcpbVarTypeString    = "string"
 
-	authTypeAPIKey      = "api_key"
-	authTypeBearerToken = "bearer_token"
-	authTypeOAuth2      = "oauth2"
+	authTypeAPIKey        = "api_key"
+	authTypeBearerToken   = "bearer_token"
+	authTypeOAuth2        = "oauth2"
+	authTypeOAuth2Refresh = "oauth2_refresh"
 )
 
 // defaultMCPBPlatforms is the set of host platforms our generated bundles
@@ -200,11 +200,10 @@ func buildMCPBManifest(dir string, m CLIManifest) MCPBManifest {
 		ManifestVersion: MCPBManifestVersion,
 		Name:            m.MCPBinary,
 		DisplayName:     displayName,
-		// Bundle version tracks the printing-press release that produced
-		// it so Claude Desktop's update detection sees a fresh value on
-		// regeneration. A hardcoded "1.0.0" would defeat the host's
-		// "newer bundle available" prompt.
-		Version:     bundleVersion(m),
+		// The generated on-disk manifest does not know the printed CLI's
+		// release tag yet. Release packaging can stamp the bundle version
+		// into the ZIP without mutating this generate-time manifest.
+		Version:     bundleVersion(),
 		Description: manifestDescription(existing, m, displayName),
 		Author:      MCPBAuthor{Name: "CLI Printing Press"},
 		License:     "Apache-2.0",
@@ -225,17 +224,10 @@ func buildMCPBManifest(dir string, m CLIManifest) MCPBManifest {
 	}
 }
 
-// bundleVersion returns a semver-shaped version for the manifest. Prefers
-// the manifest's recorded printing-press version (so two bundles built
-// from different generator releases differ), falls back to the linker-
-// stamped version when the manifest field is empty (older runs).
-func bundleVersion(m CLIManifest) string {
-	if m.PrintingPressVersion != "" {
-		return m.PrintingPressVersion
-	}
-	if version.Version != "" {
-		return version.Version
-	}
+// bundleVersion returns a semver-shaped generate-time placeholder. The MCPB
+// manifest's version is the printed CLI bundle version, which is not known
+// until release packaging passes it to BuildMCPBBundle.
+func bundleVersion() string {
 	return "0.0.0"
 }
 
@@ -376,14 +368,9 @@ func mcpbUserConfigAuthEnvVars(m CLIManifest) []spec.AuthEnvVar {
 		if envVar.Name == "" {
 			continue
 		}
-		switch envVar.Kind {
-		case "", spec.AuthEnvVarKindPerCall:
-			envVar.Kind = spec.AuthEnvVarKindPerCall
-			seen[envVar.Name] = struct{}{}
-			filtered = append(filtered, envVar)
-		case spec.AuthEnvVarKindAuthFlowInput, spec.AuthEnvVarKindHarvested:
-			continue
-		}
+		envVar.Kind = envVar.EffectiveKind()
+		seen[envVar.Name] = struct{}{}
+		filtered = append(filtered, envVar)
 	}
 	// Sibling-scheme credentials (e.g. an apiKey header alongside an OAuth
 	// bearer) ride the same user_config + env-forwarding path so MCP hosts
@@ -439,7 +426,7 @@ func authUserConfigText(m CLIManifest, envVar spec.AuthEnvVar, required bool, si
 		}
 		return title, description
 	}
-	return title, envVarDescription(m, envVar.Name, required)
+	return title, envVarDescription(m, envVar, required)
 }
 
 func endpointTemplateDefault(m CLIManifest, templateVar string) string {
@@ -455,21 +442,32 @@ func endpointTemplateDefault(m CLIManifest, templateVar string) string {
 // envVarDescription is the help text under each user_config field. The
 // registration URL (when we have one) is what makes the difference between
 // "fill this in" and "I don't know where to get this value."
-func envVarDescription(m CLIManifest, envVar string, required bool) string {
+func envVarDescription(m CLIManifest, envVar spec.AuthEnvVar, required bool) string {
 	var b strings.Builder
 	if !required {
 		b.WriteString("Optional. ")
 	}
-	b.WriteString("Sets ")
-	b.WriteString(envVar)
-	b.WriteString(" for the ")
+	switch envVar.EffectiveKind() {
+	case spec.AuthEnvVarKindAuthFlowInput:
+		b.WriteString("Collects ")
+		b.WriteString(envVar.Name)
+		b.WriteString(" for the auth setup flow used by the ")
+	case spec.AuthEnvVarKindHarvested:
+		b.WriteString("Stores ")
+		b.WriteString(envVar.Name)
+		b.WriteString(" after it is harvested by the auth setup flow for the ")
+	default:
+		b.WriteString("Sets ")
+		b.WriteString(envVar.Name)
+		b.WriteString(" for the ")
+	}
 	if m.DisplayName != "" {
 		b.WriteString(displayNameForConcat(m.DisplayName))
 	} else {
 		b.WriteString(m.APIName)
 	}
 	b.WriteString(" MCP server.")
-	if m.AuthKeyURL != "" {
+	if m.AuthKeyURL != "" && envVar.EffectiveKind() != spec.AuthEnvVarKindHarvested {
 		b.WriteString(" Get a credential from ")
 		b.WriteString(m.AuthKeyURL)
 		b.WriteString(".")
@@ -478,12 +476,12 @@ func envVarDescription(m CLIManifest, envVar string, required bool) string {
 }
 
 // authRequiresCredential decides whether a user_config field is required.
-// api_key/bearer_token/oauth2 gate every API call on the credential.
+// api_key/bearer_token/oauth2/oauth2_refresh gate every API call on the credential.
 // cookie/composed flows have unauth fallbacks for some tools, so we let
 // the user skip and hit the parts that work without credentials.
 func authRequiresCredential(authType string) bool {
 	switch authType {
-	case authTypeAPIKey, authTypeBearerToken, authTypeOAuth2:
+	case authTypeAPIKey, authTypeBearerToken, authTypeOAuth2, authTypeOAuth2Refresh:
 		return true
 	default:
 		return false
