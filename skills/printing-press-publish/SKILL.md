@@ -629,6 +629,13 @@ else
   # Also sync origin (fork) so git push works cleanly
   git push origin main --force-with-lease 2>/dev/null || true
 fi
+
+# Existing managed clones may already be sparse for a different publish
+# category. Refresh the cone for the current target category before Step 6 uses
+# filesystem-based removal and copy operations.
+if git -C "$PUBLISH_REPO_DIR" config --bool core.sparseCheckout | grep -qx true; then
+  git -C "$PUBLISH_REPO_DIR" sparse-checkout set tools cli-skills library/<category>
+fi
 ```
 
 Verify the clone is healthy:

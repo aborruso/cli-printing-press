@@ -546,6 +546,11 @@ func TestPublishSkillTracksCanonicalUpstreamAndOverwriteFlow(t *testing.T) {
 	assert.Contains(t, skill, "git fetch --filter=blob:none --depth 1 origin")
 	assert.Contains(t, skill, "git reset --hard upstream/main")
 	assert.Contains(t, skill, "git push --force-with-lease")
+
+	subsequentStart := strings.Index(skill, "### Subsequent publishes")
+	require.NotEqual(t, -1, subsequentStart)
+	subsequentBlock := skill[subsequentStart:]
+	assert.Contains(t, subsequentBlock, "sparse-checkout set tools cli-skills library/<category>")
 }
 
 func TestPublishSkillSkipsCliSkillsMirrorRegen(t *testing.T) {
