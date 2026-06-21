@@ -618,12 +618,12 @@ cd "$PUBLISH_REPO_DIR"
 
 if [ "$(jq -r .access $PUBLISH_CONFIG)" = "push" ]; then
   # Push access: origin IS the upstream
-  git fetch origin
+  git fetch --filter=blob:none --depth 1 origin
   git checkout main
   git reset --hard origin/main
 else
   # Fork: origin is the fork, upstream is canonical
-  git fetch upstream
+  git fetch --filter=blob:none --depth 1 upstream
   git checkout main
   git reset --hard upstream/main
   # Also sync origin (fork) so git push works cleanly
@@ -670,6 +670,18 @@ PREEXISTING_MERGED_PATHS=$(git -C "$PUBLISH_REPO_DIR" ls-tree -r --name-only HEA
 PREEXISTING_MERGED_COLLISION=false
 if [ -n "$PREEXISTING_MERGED_PATHS" ]; then
   PREEXISTING_MERGED_COLLISION=true
+  # If this is a category-change reprint, materialize the existing category path
+  # before Step 6 runs filesystem-based ledger preservation and removal.
+  if git -C "$PUBLISH_REPO_DIR" config --bool core.sparseCheckout | grep -qx true; then
+    while IFS= read -r EXISTING_MERGED_PATH; do
+      [ -n "$EXISTING_MERGED_PATH" ] || continue
+      if [ "$EXISTING_MERGED_PATH" != "library/<category>/<api-slug>" ]; then
+        git -C "$PUBLISH_REPO_DIR" sparse-checkout add "$EXISTING_MERGED_PATH"
+      fi
+    done <<EOF
+$PREEXISTING_MERGED_PATHS
+EOF
+  fi
 fi
 ```
 
@@ -1179,11 +1191,12 @@ cd "$PUBLISH_REPO_DIR"
 git add library/
 # The library .gitignore has a `*-pp-mcp` rule intended for the built MCP
 # binary, but the pattern also matches the generated MCP *source* directory
-# `cmd/<cli-name>-pp-mcp/`. A plain `git add library/` silently skips it, and
+# `cmd/<api-slug>-pp-mcp/`. A plain `git add library/` silently skips it, and
 # the PR then fails the "Validate MCPB manifest contract" CI check with
-# "cmd/<cli-name>-pp-mcp directory is missing". Force-add the source so the MCP
-# entry point ships. (The built binary is still ignored; only main.go is added.)
-git add -f "library/<category>/<api-slug>/cmd/<cli-name>-pp-mcp/main.go" 2>/dev/null || true
+# "cmd/<api-slug>-pp-mcp directory is missing". Force-add the source directory
+# so all MCP entry-point files ship. The built binary stays ignored because it
+# lives at the packaged CLI root, not under cmd/.
+git add -f "library/<category>/<api-slug>/cmd/<api-slug>-pp-mcp/" 2>/dev/null || true
 git commit -m "feat(<api-slug>): add <api-slug>"
 ```
 
